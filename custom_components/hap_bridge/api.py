@@ -108,6 +108,23 @@ class AccessorySpec:
         self.category = category
         self.services: list[ServiceSpec] = []
         self.info: dict[str, str | None] = {}
+        # Overrides the default "No Response" rule; see is_available().
+        self.available: Callable[[], bool] | None = None
+
+    def is_available(self) -> bool:
+        """Whether HomeKit should see the accessory as reachable.
+
+        By default: every entity the primary service watches (or, without a
+        primary, any watched entity) has a real state. Linked extras such as a
+        filter sensor going unavailable don't take the whole tile down.
+        """
+        if self.available is not None:
+            return self.available()
+        primary = next((s for s in self.services if s.primary), None)
+        if primary is not None and (watched := primary.watched()):
+            return all(self._ctx.available(eid) for eid in watched)
+        watched = [eid for s in self.services for eid in s.watched()]
+        return not watched or any(self._ctx.available(eid) for eid in watched)
 
     def service(
         self,

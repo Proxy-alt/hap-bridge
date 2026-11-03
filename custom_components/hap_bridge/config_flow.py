@@ -11,7 +11,15 @@ from homeassistant.const import CONF_NAME, CONF_PORT
 from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er, selector
 
-from .const import CONF_INCLUDE_INTEGRATIONS, DEFAULT_NAME, DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_EXCLUDE_DEVICES,
+    CONF_EXCLUDE_ENTITIES,
+    CONF_INCLUDE_DOMAINS,
+    CONF_INCLUDE_INTEGRATIONS,
+    DEFAULT_NAME,
+    DEFAULT_PORT,
+    DOMAIN,
+)
 
 
 class HapBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -49,21 +57,40 @@ class HapBridgeOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(data=user_input)
 
-        domains = sorted({e.platform for e in er.async_get(self.hass).entities.values()})
+        entities = [
+            e for e in er.async_get(self.hass).entities.values() if e.platform != DOMAIN
+        ]
+        options = self.config_entry.options
+
+        def multi_select(choices: set[str]) -> selector.SelectSelector:
+            return selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=sorted(choices),
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
                         CONF_INCLUDE_INTEGRATIONS,
-                        default=self.config_entry.options.get(CONF_INCLUDE_INTEGRATIONS, []),
-                    ): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=domains,
-                            multiple=True,
-                            mode=selector.SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
+                        default=options.get(CONF_INCLUDE_INTEGRATIONS, []),
+                    ): multi_select({e.platform for e in entities}),
+                    vol.Optional(
+                        CONF_INCLUDE_DOMAINS,
+                        default=options.get(CONF_INCLUDE_DOMAINS, []),
+                    ): multi_select({e.domain for e in entities}),
+                    vol.Optional(
+                        CONF_EXCLUDE_DEVICES,
+                        default=options.get(CONF_EXCLUDE_DEVICES, []),
+                    ): selector.DeviceSelector(selector.DeviceSelectorConfig(multiple=True)),
+                    vol.Optional(
+                        CONF_EXCLUDE_ENTITIES,
+                        default=options.get(CONF_EXCLUDE_ENTITIES, []),
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(multiple=True)),
                 }
             ),
         )

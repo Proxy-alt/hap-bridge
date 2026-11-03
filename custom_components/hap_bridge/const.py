@@ -3,6 +3,9 @@
 DOMAIN = "hap_bridge"
 
 CONF_INCLUDE_INTEGRATIONS = "include_integrations"
+CONF_INCLUDE_DOMAINS = "include_domains"
+CONF_EXCLUDE_DEVICES = "exclude_devices"
+CONF_EXCLUDE_ENTITIES = "exclude_entities"
 
 DEFAULT_NAME = "HAP Bridge"
 DEFAULT_PORT = 21070
@@ -16,3 +19,7 @@ MAX_BRIDGED_ACCESSORIES = 149
 PLATFORM = DOMAIN
 
 STORAGE_VERSION = 1
+
+# Seconds to wait after a device/entity registry change before rebuilding the
+# bridge, so a newly added device's burst of entities causes one reload.
+REGISTRY_RELOAD_COOLDOWN = 30

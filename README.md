@@ -77,8 +77,20 @@ later never renumbers existing ones (see `tests/test_ids.py`).
 
 Copy `custom_components/hap_bridge` into your HA config (or add this repo to
 HACS as a custom repository), restart, add **HAP Bridge** in Settings →
-Devices & services, then pair using the code from the notification. Use the
-options to limit which integrations are exposed.
+Devices & services, then pair by scanning the QR code in the notification (or
+typing its code). The bridge's **Reset pairing** button removes every paired
+Home app so you can add it again.
+
+The options choose what to expose: only some integrations or entity domains,
+minus excluded devices and entities. Adding, removing or renaming devices and
+entities rebuilds the bridge after 30 seconds of quiet.
+
+An accessory shows **No Response** in the Home app when the entities its
+primary service watches are unavailable. A profile can change that rule with
+`acc.available = lambda: ...`.
+
+Download diagnostics on the integration to see each accessory as HomeKit sees it:
+AIDs, services, IIDs, values and the entities it watches.
 
 ## Development
 
@@ -87,14 +99,22 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest
 ```
 
-Tests cover ID stability with real HAP-python objects and validate every
-bundled profile against HAP-python's catalogue. They don't need Home Assistant.
+`tests/` covers ID stability with real HAP-python objects and validates every
+bundled profile against HAP-python's catalogue. It doesn't need Home Assistant.
+
+`tests_ha/` runs the bridge inside a real Home Assistant (with the HAP server
+stubbed out): exposure, writes, No Response, pairing, filters and reloads.
+
+```bash
+python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
+.venv-ha/bin/python -m pytest tests_ha -o asyncio_mode=auto
+```
 
 ## Not done yet
 
-- **Not yet run inside a real Home Assistant.** Only the HA-free parts are tested.
+- **Not yet paired with a real Home app.** The HA tests stub out the HAP server.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Writes aren't batched.** Home sends `On` + `Brightness` together, and that makes two service calls.
 - **No standalone (non-bridged) accessory mode** for cameras and TVs.
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
-- **No accessory reload without restart.** Changing entities means reloading the entry.
+- **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.

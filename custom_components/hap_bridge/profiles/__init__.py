@@ -10,8 +10,10 @@ Each step only sees entities the previous steps didn't claim.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 import logging
 from types import ModuleType
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -19,23 +21,26 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.loader import async_get_integration
 
 from ..api import AccessorySpec, HapContext
-from ..const import CONF_INCLUDE_INTEGRATIONS, PLATFORM
+from ..const import (
+    CONF_EXCLUDE_DEVICES,
+    CONF_EXCLUDE_ENTITIES,
+    CONF_INCLUDE_DOMAINS,
+    CONF_INCLUDE_INTEGRATIONS,
+    DOMAIN,
+    PLATFORM,
+)
 from . import fallback, generic
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_collect_specs(hass: HomeAssistant, entry: ConfigEntry) -> list[AccessorySpec]:
-    include = set(entry.options.get(CONF_INCLUDE_INTEGRATIONS, []))
     dev_reg = dr.async_get(hass)
 
     by_device: dict[str | None, list[er.RegistryEntry]] = defaultdict(list)
     for ent in er.async_get(hass).entities.values():
-        if ent.disabled_by is not None:
-            continue
-        if include and ent.platform not in include:
-            continue
-        by_device[ent.device_id].append(ent)
+        if ent.disabled_by is None and is_included(entry.options, ent):
+            by_device[ent.device_id].append(ent)
 
     platforms: dict[str, ModuleType | None] = {}
     specs: list[AccessorySpec] = []
@@ -69,6 +74,19 @@ async def async_collect_specs(hass: HomeAssistant, entry: ConfigEntry) -> list[A
             specs.extend(ctx.accessories)
 
     return specs
+
+
+def is_included(options: Mapping[str, Any], ent: er.RegistryEntry) -> bool:
+    """Apply the options-flow filters. Empty include lists mean "everything"."""
+    if ent.platform == DOMAIN:
+        return False  # the bridge's own entities
+    if (integrations := options.get(CONF_INCLUDE_INTEGRATIONS)) and ent.platform not in integrations:
+        return False
+    if (domains := options.get(CONF_INCLUDE_DOMAINS)) and ent.domain not in domains:
+        return False
+    if ent.device_id is not None and ent.device_id in options.get(CONF_EXCLUDE_DEVICES, ()):
+        return False
+    return ent.entity_id not in options.get(CONF_EXCLUDE_ENTITIES, ())
 
 
 async def _async_platform(

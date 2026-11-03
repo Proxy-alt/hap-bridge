@@ -12,8 +12,13 @@
   "options": {
     "step": {
       "init": {
-        "title": "Exposed integrations",
-        "data": { "include_integrations": "Only expose devices from these integrations (empty = all)" }
+        "title": "What to expose",
+        "data": {
+          "include_integrations": "Only expose devices from these integrations (empty = all)",
+          "include_domains": "Only expose these entity domains (empty = all)",
+          "exclude_devices": "Never expose these devices",
+          "exclude_entities": "Never expose these entities"
+        }
       }
     }
   },
@@ -21,6 +26,11 @@
     "start_failed": {
       "title": "HAP Bridge {name} failed to start",
       "description": "The bridge could not start, so its accessories are unavailable in HomeKit.\n\nError: {error}\n\nCheck the log for details, then reload the integration."
+    }
+  },
+  "entity": {
+    "button": {
+      "reset_pairing": { "name": "Reset pairing" }
     }
   }
 }

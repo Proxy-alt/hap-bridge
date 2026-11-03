@@ -5,6 +5,7 @@ requires-python = ">=3.13"
 
 [project.optional-dependencies]
 test = ["pytest", "HAP-python>=4.9.2"]
+test-ha = ["pytest-homeassistant-custom-component", "HAP-python>=4.9.2", "base36", "PyQRCode"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
