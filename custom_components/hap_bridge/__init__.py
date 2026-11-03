@@ -7,17 +7,30 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import (
+    Event,
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.typing import ConfigType
+import voluptuous as vol
 
+from . import issues
 from .bridge import HapBridge
 from .const import DOMAIN, REGISTRY_RELOAD_COOLDOWN
+from .preview import async_preview
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +44,44 @@ _ENTITY_CHANGES = {
 _DEVICE_CHANGES = {"name", "name_by_user", "disabled_by"}
 
 type HapBridgeConfigEntry = ConfigEntry[HapBridge]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+PREVIEW_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Optional("device_id"): cv.string,
+            vol.Optional("entity_id"): cv.entity_id,
+            vol.Optional("config_entry_id"): cv.string,
+        }
+    ),
+    cv.has_at_least_one_key("device_id", "entity_id"),
+)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    async def _preview(call: ServiceCall) -> ServiceResponse:
+        entry = _preview_entry(hass, call.data.get("config_entry_id"))
+        return await async_preview(
+            hass, entry, device_id=call.data.get("device_id"), entity_id=call.data.get("entity_id")
+        )
+
+    hass.services.async_register(
+        DOMAIN, "preview", _preview, schema=PREVIEW_SCHEMA, supports_response=SupportsResponse.ONLY
+    )
+    return True
+
+
+def _preview_entry(hass: HomeAssistant, entry_id: str | None) -> ConfigEntry:
+    """The bridge whose options (included/excluded entities) the preview uses."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if entry_id is not None:
+        entries = [e for e in entries if e.entry_id == entry_id]
+    if not entries:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_bridge"
+        )
+    return entries[0]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HapBridgeConfigEntry) -> bool:
@@ -70,6 +121,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: HapBridgeConfigEntry) -
     await entry.runtime_data.async_stop()
     ir.async_delete_issue(hass, DOMAIN, _issue_id(entry))
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: HapBridgeConfigEntry) -> None:
+    issues.async_clear_profile_issues(hass, entry)
 
 
 def _issue_id(entry: ConfigEntry) -> str:

@@ -1,0 +1,12 @@
+preview:
+  fields:
+    device_id:
+      selector:
+        device:
+    entity_id:
+      selector:
+        entity:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: hap_bridge

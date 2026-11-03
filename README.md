@@ -63,52 +63,134 @@ startup; an invalid accessory is skipped with a log line naming the problem.
 
 ## Writing a profile
 
-An integration adds `custom_components/<domain>/hap_bridge.py` (or
-`homeassistant/components/<domain>/hap_bridge.py`):
+An integration adds `hap_bridge.py` next to its other platforms
+(`custom_components/<domain>/` or `homeassistant/components/<domain>/`).
+[examples/hap_bridge.py](examples/hap_bridge.py) is a commented starting
+point.
 
 ```python
-from custom_components.hap_bridge.api import HapContext
+HAP_BRIDGE_API = 1  # optional: the API version this profile needs
 
-async def async_describe_device(ctx: HapContext) -> None:
+async def async_describe_device(ctx) -> None:
     fan = ctx.entity("fan")
     filter_life = ctx.entity("sensor", translation_key="filter_life")
     if fan is None:
         return
 
     acc = ctx.accessory(category="AIR_PURIFIER")
-    purifier = acc.service("AirPurifier", primary=True)
+    purifier = ctx.blocks.fan(acc.service(ctx.hap.Service.AIR_PURIFIER, primary=True), fan)
     purifier.char(
-        "Active",
+        ctx.hap.Char.CURRENT_AIR_PURIFIER_STATE,
         watch=[fan],
-        get=lambda: int(ctx.is_on(fan)),
-        set=lambda v: ctx.call("fan", "turn_on" if v else "turn_off", fan),
+        get=lambda: ctx.hap.CurrentAirPurifierState.PURIFYING_AIR if ctx.is_on(fan)
+        else ctx.hap.CurrentAirPurifierState.INACTIVE,
     )
-    purifier.char("RotationSpeed", watch=[fan], props={"minStep": 25},
-                  get=lambda: ctx.attr(fan, "percentage"),
-                  set=lambda v: ctx.call("fan", "set_percentage", fan, percentage=v))
-    ...
     if filter_life:
-        acc.service("FilterMaintenance", linked_to=purifier).char(
-            "FilterLifeLevel", watch=[filter_life], get=lambda: ctx.number(filter_life))
+        ctx.blocks.filter(acc.service("FilterMaintenance", linked_to=purifier), life=filter_life)
 ```
 
-- Names are raw HAP names (`pyhap/resources/services.json`,
-  `characteristics.json`). `props` and `valid_values` are raw HAP props.
-- `get` reruns whenever a `watch`ed entity changes, and its result is pushed to
-  HomeKit. Returning `None` skips the update. Values are HAP values (e.g.
-  `Active` is `0/1`).
-- `set` receives the HAP value when a controller writes. It can return a
-  coroutine. `ctx.call(...)` does exactly that.
-- `get`/`set` don't have to involve HA entities at all. They can talk to the
-  device directly.
-- Watching an entity claims it, so the fallback won't expose it again.
-- `svc.on_write(fn)` handles a whole controller write to a service at once:
-  `fn` gets `{characteristic: value}` for everything the Home app changed
-  together, e.g. On + Brightness + Hue, so it can make one service call.
-- `affects_available=False` on a characteristic keeps its entities out of
-  the "No Response" check (for side details like battery or tamper flags).
+**Nothing to import.** Everything comes in through `ctx`, so core integrations
+can ship a profile, and it's harmless when HAP Bridge isn't installed. Import
+`HapContext` under `TYPE_CHECKING` if you want types.
+
+**Blocks: `ctx.blocks`.** These are the bridge's own tested mappings. Each
+binds an entity onto a service you created and returns it. Put a block on the
+wrong service or entity and it raises an error saying what to fix.
+
+| Block | Service |
+|---|---|
+| `light` (incl. color and Adaptive Lighting) | Lightbulb |
+| `switch` | Switch / Outlet |
+| `fan` | Fanv2 / AirPurifier |
+| `thermostat`, `water_heater` | Thermostat |
+| `heater_cooler` | HeaterCooler |
+| `humidifier` | HumidifierDehumidifier |
+| `lock` | LockMechanism |
+| `window_covering` | WindowCovering |
+| `garage_door` | GarageDoorOpener |
+| `security_system` | SecuritySystem |
+| `valve` | Valve |
+| `vacuum`, `lawn_mower`, `momentary` | Switch |
+| `doorbell`, `button` | Doorbell / StatelessProgrammableSwitch |
+| `sensor` (any sensor or binary sensor HomeKit has a service for) | see `sensor_service_type` |
+| `air_quality(pm25=, pm10=, voc=, ...)` | AirQualitySensor |
+| `filter(life=, change=, reset=)` | FilterMaintenance |
+| `battery(level, low=, charging=)` | BatteryService |
+
+`tv(media_player, remote=)`, `activity_remote(remote)` and
+`camera(camera, doorbell=, motion=)` build whole standalone accessories.
+`climate_service_type(climate)` says whether core HomeKit's rule makes it a
+Thermostat or a HeaterCooler.
+
+**Names: `ctx.hap`.** Service, characteristic and value names, generated from
+HAP-python's catalogue (`scripts/gen_hap.py`). For example
+`ctx.hap.Service.AIR_PURIFIER`, `ctx.hap.Char.ACTIVE`, or
+`ctx.hap.ContactSensorState.CONTACT_NOT_DETECTED` instead of `1`.
+
+**Binding characteristics directly**, for anything the blocks don't cover:
+- `get` reruns whenever a `watch`ed entity changes, and its result is pushed
+  to HomeKit. Returning `None` skips the update.
+- `set` receives the HomeKit value when the Home app writes. It can return a
+  coroutine; `ctx.call(...)` does exactly that.
+- `get`/`set` don't have to involve entities. `ctx.runtime_data("<your
+  domain>")` returns your config entry's `runtime_data` (coordinator, client)
+  to talk to the device directly.
+- Watching an entity claims it, so the bridge's own mapping won't expose it
+  again.
+- `svc.on_write(fn)` gets a whole Home app write to a service at once
+  (`{characteristic: value}`, e.g. On + Brightness + Hue), so it can make one
+  call.
+- `affects_available=False` on a characteristic keeps its entities out of the
+  "No Response" check (for side details like battery or tamper flags).
 - `ctx.accessory(key=...)` decides the AID. The default (the device ID) is
   stable; only override it with something equally stable.
+- `ctx.accessory(standalone=True)` publishes the accessory with its own
+  pairing code instead of behind the bridge.
+
+### Checking a profile
+
+- **Preview.** In Developer tools → Actions, run **HAP Bridge: Preview**
+  (`hap_bridge.preview`) with a device or entity. It runs the same steps as a
+  bridge start and returns:
+  - each accessory: which step built it (`integration:<domain>`,
+    `profile:<name>` or `fallback`), its services and current values, and
+    validation errors or warnings;
+  - entities left out, and why;
+  - problems with your profile.
+
+  Nothing is paired or changed, and there's no restart needed between edits.
+- **Repair issues.** If your profile raises, can't be imported, builds an
+  accessory HomeKit would reject, or needs a newer `HAP_BRIDGE_API`, users get
+  a repair issue naming your integration and the problem.
+  - What your profile built is undone, so the device still shows up through
+    the bridge's own mapping.
+  - The issue clears on the next start without problems.
+- **Diagnostics** list the same things for the whole bridge: the source of
+  each accessory, excluded entities with reasons, and profile problems.
+- **Tests.** `custom_components.hap_bridge.testing` runs your profile against
+  fake states, with no Home Assistant or Home app:
+
+  ```python
+  from custom_components.hap_bridge import testing
+
+  async def test_purifier():
+      hass = testing.FakeHass()
+      hass.states.set("fan.p", "on", percentage=50)
+      result = await testing.async_describe(hap_bridge.async_describe_device,
+                                            [testing.entry("fan.p")], hass=hass)
+      result.assert_valid()  # what the bridge would reject at startup
+      acc = result.accessory()
+      assert result.values(acc)["AirPurifier.Active"] == 1
+      await result.async_write(acc, "AirPurifier", "Active", 0)
+      assert hass.services.calls[-1][:2] == ("fan", "turn_off")
+  ```
+
+### API versions
+
+`ctx.api_version` is the bridge's API version (now 1). It goes up only for
+incompatible changes. Set `HAP_BRIDGE_API` to the version your profile needs.
+An older bridge then skips the profile with a repair issue instead of breaking
+on it.
 
 ## TVs and cameras
 

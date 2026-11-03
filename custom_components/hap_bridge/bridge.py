@@ -32,13 +32,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import STORAGE_DIR, Store
 
-from . import pairing
+from . import issues, pairing
 from .accessories import SpecAccessory, diagnose
 from .adaptive import CHARACTERISTICS as ADAPTIVE_CHARACTERISTICS, AdaptiveLighting
 from .api import AccessorySpec, CharSpec, Settings
 from .const import BRIDGE_AID, DOMAIN, MAX_BRIDGED_ACCESSORIES, STORAGE_VERSION
 from .ids import IdRegistry, StableIIDManager
-from .profiles import async_collect_specs
+from .profiles import Problem, async_collect_specs
 from .validate import validate_spec
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,6 +85,10 @@ class HapBridge:
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.settings"
         )
         self.units: dict[str, Unit] = {}
+        # From the last start: entities left out (and why), and problems with
+        # integrations' own profiles.
+        self.excluded: dict[str, str] = {}
+        self.problems: list[Problem] = []
         self._bindings: dict[str, list[tuple[Characteristic, CharSpec]]] = defaultdict(list)
         self._unsub_state: Callable[[], None] | None = None
 
@@ -127,10 +131,12 @@ class HapBridge:
         )
         bridge_unit.root = bridge
 
-        specs = await async_collect_specs(self.hass, self.entry, settings)
+        collection = await async_collect_specs(self.hass, self.entry, settings)
+        self.excluded = collection.excluded
+        self.problems = collection.problems
         standalone: list[AccessorySpec] = []
         seen_keys: set[str] = set()
-        for spec in specs:
+        for spec in collection.specs:
             # The key decides the AID; a second accessory with the same key would
             # make Bridge.add_accessory raise and take the whole bridge down.
             if spec.key in seen_keys:
@@ -141,6 +147,10 @@ class HapBridge:
                 _LOGGER.warning("%s (%s): %s", spec.name, spec.key, warning)
             if errors:
                 _LOGGER.error("Skipping %s (%s): %s", spec.name, spec.key, "; ".join(errors))
+                if spec.source.startswith("integration:"):
+                    self.problems.append(Problem(
+                        spec.source.split(":", 1)[1], f"{spec.name}: {'; '.join(errors)}"
+                    ))
                 continue
             seen_keys.add(spec.key)
             if spec.standalone:
@@ -192,6 +202,7 @@ class HapBridge:
             "HAP bridge %s started with %s accessories and %s standalone",
             bridge.display_name, len(bridge_unit.accessories), len(standalone),
         )
+        issues.async_update_profile_issues(self.hass, self.entry, self.problems)
         async_dispatcher_send(self.hass, SIGNAL_UNITS.format(self.entry.entry_id))
 
     async def _async_new_unit(self, unit_id: str, name: str, port: int, zc: Any) -> Unit:
@@ -279,6 +290,11 @@ class HapBridge:
                 for unit in self.units.values()
             ],
             "accessories": [diagnose(spec, acc) for spec, acc in self._accessories],
+            "excluded": dict(sorted(self.excluded.items())),
+            "profile_problems": [
+                {"integration": p.integration, "device": p.device, "problem": p.message}
+                for p in self.problems
+            ],
         }
 
     # -- building accessories -------------------------------------------------------------

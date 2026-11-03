@@ -23,6 +23,10 @@
     }
   },
   "issues": {
+    "profile_error": {
+      "title": "{integration}'s HomeKit profile has problems",
+      "description": "The {integration} integration describes its devices for HomeKit, but on bridge {bridge} that description failed:\n\n{problems}\n\nThose devices still appear in HomeKit using the bridge's own mapping. If you develop {integration}, the `hap_bridge.preview` action shows what HomeKit gets for a device. Otherwise, report this to the integration's authors."
+    },
     "start_failed": {
       "title": "HAP Bridge {name} failed to start",
       "description": "The bridge could not start, so its accessories are unavailable in HomeKit.\n\nError: {error}\n\nCheck the log for details, then reload the integration."
@@ -33,5 +37,19 @@
       "reset_pairing": { "name": "Reset pairing" },
       "reset_accessory_pairing": { "name": "Reset pairing: {name}" }
     }
+  },
+  "services": {
+    "preview": {
+      "name": "Preview",
+      "description": "Shows what HomeKit would get for a device or entity: accessories, services, current values, which step built them, validation problems, and what's left out and why. Nothing is paired or changed.",
+      "fields": {
+        "device_id": { "name": "Device", "description": "The device to preview." },
+        "entity_id": { "name": "Entity", "description": "Or a single entity to preview." },
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge's options to use (default: the first)." }
+      }
+    }
+  },
+  "exceptions": {
+    "no_bridge": { "message": "No HAP Bridge is set up (or that bridge isn't loaded)." }
   }
 }

@@ -34,6 +34,19 @@ def describe_entity(ctx: HapContext, ent: RegistryEntry) -> None:
         builder(ctx, ent)
 
 
+def why_not(ent: RegistryEntry) -> str:
+    """Why the fallback leaves an entity out (when nothing else used it)."""
+    if ent.entity_category is not None:
+        return f"{ent.entity_category} entity"
+    if ent.hidden_by is not None:
+        return "hidden"
+    if ent.domain not in _BUILDERS:
+        return f"HomeKit has no mapping for {ent.domain} entities"
+    if (device_class := _device_class(ent)) is not None:
+        return f"HomeKit has no mapping for this {ent.domain} (device class {device_class})"
+    return f"HomeKit has no mapping for this {ent.domain}"
+
+
 def _accessory(ctx: HapContext, ent: RegistryEntry, category: str):
     return ctx.accessory(ctx.name_of(ent.entity_id), category=category, key=f"entity:{ent.id}")
 
@@ -410,6 +423,61 @@ def bind_air_quality(ctx: HapContext, svc: ServiceSpec, sensors: dict[str, str])
         svc.char(AIR_POLLUTANTS[device_class][0], watch=[eid], get=lambda eid=eid: ctx.number(eid))
 
 
+
+def bind_filter(
+    ctx: HapContext,
+    svc: ServiceSpec,
+    *,
+    life: str | None = None,
+    change: str | None = None,
+    reset: str | None = None,
+) -> None:
+    """FilterMaintenance from a filter-life sensor (%), a "replace filter" binary
+    sensor and/or a "reset filter" button. Needs `life` or `change`."""
+    if life is not None:
+        svc.char("FilterLifeLevel", watch=[life], get=lambda: ctx.number(life))
+    if change is not None:
+        svc.char("FilterChangeIndication", watch=[change], get=lambda: int(ctx.is_on(change)))
+    elif life is not None:
+        svc.char("FilterChangeIndication", watch=[life],
+                 get=lambda: int((ctx.number(life) or 100) < 10))
+    if reset is not None:
+        # Write-only in HomeKit: the Home app's "reset filter" presses the button.
+        svc.char("ResetFilterIndication", watch=[reset],
+                 set=lambda _v: ctx.call("button", "press", reset))
+
+
+# StatusLowBattery below this level when there's no low-battery binary sensor.
+LOW_BATTERY_PERCENT = 20
+
+
+def low_battery(ctx: HapContext, level: str | None, low: str | None) -> Callable[[], int]:
+    def is_low() -> int:
+        if low is not None:
+            return int(ctx.is_on(low))
+        return int((ctx.number(level) or 100) < LOW_BATTERY_PERCENT)
+
+    return is_low
+
+
+def bind_battery(
+    ctx: HapContext,
+    svc: ServiceSpec,
+    level: str,
+    *,
+    low: str | None = None,
+    charging: str | None = None,
+) -> None:
+    """BatteryService from a level sensor (%), optional low-battery and charging sensors."""
+    svc.char("BatteryLevel", watch=[level], get=lambda: ctx.number(level))
+    svc.char("StatusLowBattery", watch=[e for e in (low, level) if e],
+             get=low_battery(ctx, level, low))
+    # ChargingState: 0 = not charging, 1 = charging, 2 = not chargeable.
+    if charging is not None:
+        svc.char("ChargingState", watch=[charging], get=lambda: int(ctx.is_on(charging)))
+    else:
+        svc.char("ChargingState", watch=[level], get=lambda: 2)
+
 # -- per-domain accessories -----------------------------------------------------
 
 
@@ -437,43 +505,13 @@ _GAS_SENSORS = {
 }
 
 
-def _sensor(ctx: HapContext, ent: RegistryEntry) -> None:
-    eid = ent.entity_id
-    device_class = _device_class(ent)
-    if device_class == "temperature":
-
-        def celsius() -> float | None:
-            value = ctx.number(eid)
-            if value is not None and ctx.attr(eid, "unit_of_measurement") == "°F":
-                value = (value - 32) * 5 / 9
-            return value
-
-        svc = _accessory(ctx, ent, "SENSOR").service("TemperatureSensor", primary=True)
-        svc.char("CurrentTemperature", watch=[eid], get=celsius)
-    elif device_class == "humidity":
-        svc = _accessory(ctx, ent, "SENSOR").service("HumiditySensor", primary=True)
-        svc.char("CurrentRelativeHumidity", watch=[eid], get=lambda: ctx.number(eid))
-    elif device_class == "illuminance":
-        svc = _accessory(ctx, ent, "SENSOR").service("LightSensor", primary=True)
-        # HAP's minimum is 0.0001 lx; 0 would be rejected.
-        svc.char(
-            "CurrentAmbientLightLevel",
-            watch=[eid],
-            get=lambda: None if (lux := ctx.number(eid)) is None else max(lux, 0.0001),
-        )
-    elif device_class in _GAS_SENSORS:
-        service, prefix, threshold = _GAS_SENSORS[device_class]
-        svc = _accessory(ctx, ent, "SENSOR").service(service, primary=True)
-        svc.char(f"{prefix}Level", watch=[eid], get=lambda: ctx.number(eid))
-        svc.char(
-            f"{prefix}Detected",
-            watch=[eid],
-            get=lambda: int((ctx.number(eid) or 0) > threshold),
-        )
-    elif device_class in AIR_POLLUTANTS:
-        svc = _accessory(ctx, ent, "SENSOR").service("AirQualitySensor", primary=True)
-        bind_air_quality(ctx, svc, {device_class: eid})
-
+_SENSOR_SERVICES = {
+    "temperature": "TemperatureSensor",
+    "humidity": "HumiditySensor",
+    "illuminance": "LightSensor",
+    **{dc: service for dc, (service, _p, _t) in _GAS_SENSORS.items()},
+    **{dc: "AirQualitySensor" for dc in AIR_POLLUTANTS},
+}
 
 _BINARY_SENSORS: dict[str, tuple[str, str, Callable[[bool], Any]]] = {
     "motion": ("MotionSensor", "MotionDetected", bool),
@@ -492,20 +530,58 @@ _BINARY_SENSORS: dict[str, tuple[str, str, Callable[[bool], Any]]] = {
 }
 
 
-def _binary_sensor(ctx: HapContext, ent: RegistryEntry) -> None:
-    mapping = _BINARY_SENSORS.get(_device_class(ent) or "")
-    if mapping is None:
-        return
-    service, char, convert = mapping
+def sensor_service(ent: RegistryEntry) -> str | None:
+    """The HomeKit service for a sensor or binary sensor, or None if there's none."""
+    device_class = _device_class(ent) or ""
+    if ent.domain == "binary_sensor":
+        mapping = _BINARY_SENSORS.get(device_class)
+        return mapping[0] if mapping else None
+    if ent.domain == "sensor":
+        return _SENSOR_SERVICES.get(device_class)
+    return None
+
+
+def bind_sensor(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """A sensor or binary sensor on the service `sensor_service(ent)` names."""
     eid = ent.entity_id
-    svc = _accessory(ctx, ent, "SENSOR").service(service, primary=True)
-    svc.char(char, watch=[eid], get=lambda: convert(ctx.is_on(eid)))
+    device_class = _device_class(ent) or ""
+    if ent.domain == "binary_sensor":
+        _service, char, convert = _BINARY_SENSORS[device_class]
+        svc.char(char, watch=[eid], get=lambda: convert(ctx.is_on(eid)))
+    elif device_class == "temperature":
+
+        def celsius() -> float | None:
+            value = ctx.number(eid)
+            if value is not None and ctx.attr(eid, "unit_of_measurement") == "°F":
+                value = (value - 32) * 5 / 9
+            return value
+
+        svc.char("CurrentTemperature", watch=[eid], get=celsius)
+    elif device_class == "humidity":
+        svc.char("CurrentRelativeHumidity", watch=[eid], get=lambda: ctx.number(eid))
+    elif device_class == "illuminance":
+        # HAP's minimum is 0.0001 lx; 0 would be rejected.
+        svc.char(
+            "CurrentAmbientLightLevel",
+            watch=[eid],
+            get=lambda: None if (lux := ctx.number(eid)) is None else max(lux, 0.0001),
+        )
+    elif device_class in _GAS_SENSORS:
+        _service, prefix, threshold = _GAS_SENSORS[device_class]
+        svc.char(f"{prefix}Level", watch=[eid], get=lambda: ctx.number(eid))
+        svc.char(
+            f"{prefix}Detected",
+            watch=[eid],
+            get=lambda: int((ctx.number(eid) or 0) > threshold),
+        )
+    elif device_class in AIR_POLLUTANTS:
+        bind_air_quality(ctx, svc, {device_class: eid})
 
 
 _LOCK_STATES = {"unlocked": 0, "locked": 1, "jammed": 2}
 
 
-def _lock(ctx: HapContext, ent: RegistryEntry) -> None:
+def bind_lock(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
     eid = ent.entity_id
 
     def current() -> int:
@@ -518,7 +594,6 @@ def _lock(ctx: HapContext, ent: RegistryEntry) -> None:
             return None
         return 1 if state.state in ("locked", "locking") else 0
 
-    svc = _accessory(ctx, ent, "DOOR_LOCK").service("LockMechanism", primary=True)
     svc.char("LockCurrentState", watch=[eid], get=current)
     svc.char(
         "LockTargetState",
@@ -528,18 +603,9 @@ def _lock(ctx: HapContext, ent: RegistryEntry) -> None:
     )
 
 
-def _cover(ctx: HapContext, ent: RegistryEntry) -> None:
-    if _device_class(ent) == "garage":
-        bind_garage_door(
-            ctx,
-            _accessory(ctx, ent, "GARAGE_DOOR_OPENER").service("GarageDoorOpener", primary=True),
-            ent,
-        )
-        return
-    if not ent.supported_features & COVER_SET_POSITION:
-        return
+def bind_window_covering(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """A cover with a settable position (and tilt, if it has one)."""
     eid = ent.entity_id
-    svc = _accessory(ctx, ent, "WINDOW_COVERING").service("WindowCovering", primary=True)
     svc.char(
         "CurrentPosition", watch=[eid], get=lambda: ctx.attr(eid, "current_position")
     )
@@ -570,6 +636,27 @@ def _cover(ctx: HapContext, ent: RegistryEntry) -> None:
                 "cover", "set_cover_tilt_position", eid, tilt_position=round((v + 90) / 180 * 100)
             ),
         )
+
+
+def _sensor(ctx: HapContext, ent: RegistryEntry) -> None:
+    if (service := sensor_service(ent)) is not None:
+        bind_sensor(ctx, _accessory(ctx, ent, "SENSOR").service(service, primary=True), ent)
+
+
+def _lock(ctx: HapContext, ent: RegistryEntry) -> None:
+    bind_lock(ctx, _accessory(ctx, ent, "DOOR_LOCK").service("LockMechanism", primary=True), ent)
+
+
+def _cover(ctx: HapContext, ent: RegistryEntry) -> None:
+    if _device_class(ent) == "garage":
+        bind_garage_door(
+            ctx,
+            _accessory(ctx, ent, "GARAGE_DOOR_OPENER").service("GarageDoorOpener", primary=True),
+            ent,
+        )
+    elif ent.supported_features & COVER_SET_POSITION:
+        acc = _accessory(ctx, ent, "WINDOW_COVERING")
+        bind_window_covering(ctx, acc.service("WindowCovering", primary=True), ent)
 
 
 def _climate(ctx: HapContext, ent: RegistryEntry) -> None:
@@ -606,10 +693,9 @@ def _remote(ctx: HapContext, ent: RegistryEntry) -> None:
 
 
 def _camera(ctx: HapContext, ent: RegistryEntry) -> None:
-    eid = ent.entity_id
-    acc = ctx.accessory(ctx.name_of(eid), category="CAMERA", key=f"entity:{ent.id}", camera=eid)
-    acc.claim(eid)
-    acc.available = lambda: ctx.available(eid)
+    from .cameras import describe_camera  # cameras imports this module
+
+    describe_camera(ctx, ent.entity_id, name=ctx.name_of(ent.entity_id), key=f"entity:{ent.id}")
 
 
 def _button(ctx: HapContext, ent: RegistryEntry) -> None:
@@ -641,7 +727,7 @@ _BUILDERS: dict[str, Callable[[HapContext, RegistryEntry], None]] = {
     "input_boolean": _switch,
     "fan": _fan,
     "sensor": _sensor,
-    "binary_sensor": _binary_sensor,
+    "binary_sensor": _sensor,
     "lock": _lock,
     "cover": _cover,
     "climate": _climate,

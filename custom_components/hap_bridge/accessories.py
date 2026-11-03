@@ -61,6 +61,7 @@ def diagnose(spec: AccessorySpec, acc: Accessory) -> dict[str, Any]:
         "key": spec.key,
         "name": spec.name,
         "category": acc.category,
+        "source": spec.source,
         "standalone": spec.standalone,
         "available": acc.available,
         "watches": watched,

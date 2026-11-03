@@ -11,17 +11,20 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..api import HapContext
-from . import appliances, tv
+from . import appliances, cameras, tv
 from .fallback import (
     AIR_POLLUTANTS,
     bind_air_quality,
+    bind_battery,
     bind_button,
     bind_doorbell,
     bind_fan,
+    bind_filter,
     bind_garage_door,
     bind_light,
     bind_thermostat,
     button_presses,
+    low_battery,
 )
 
 
@@ -95,22 +98,8 @@ def air_purifier(ctx: HapContext) -> None:
     )
 
     if filter_life is not None or filter_change is not None:
-        filt = acc.service("FilterMaintenance", linked_to=purifier)
-        if filter_life is not None:
-            filt.char("FilterLifeLevel", watch=[filter_life], get=lambda: ctx.number(filter_life))
-        if filter_change is not None:
-            filt.char("FilterChangeIndication", watch=[filter_change],
-                      get=lambda: int(ctx.is_on(filter_change)))
-        else:
-            filt.char(
-                "FilterChangeIndication",
-                watch=[filter_life],
-                get=lambda: int((ctx.number(filter_life) or 100) < 10),
-            )
-        if filter_reset is not None:
-            # Write-only in HomeKit: the Home app's "reset filter" presses the button.
-            filt.char("ResetFilterIndication", watch=[filter_reset],
-                      set=lambda _v: ctx.call("button", "press", filter_reset))
+        bind_filter(ctx, acc.service("FilterMaintenance", linked_to=purifier),
+                    life=filter_life, change=filter_change, reset=filter_reset)
 
     if pollutants:
         bind_air_quality(ctx, acc.service("AirQualitySensor", linked_to=purifier), pollutants)
@@ -170,35 +159,14 @@ def camera(ctx: HapContext) -> None:
     """A camera, as a video doorbell if the device has a doorbell, with its motion sensor."""
     if ctx.device is None:
         return
-    cameras = ctx.entities("camera")
-    if not cameras:
+    cameras_ = ctx.entities("camera")
+    if not cameras_:
         return
     bell = ctx.entity("event", device_class="doorbell")
     motion = ctx.entity("binary_sensor", device_class="motion")
-    for index, eid in enumerate(cameras):
-        first = index == 0
-        acc = ctx.accessory(
-            None if first else ctx.name_of(eid),
-            category="VIDEO_DOOR_BELL" if first and bell else "CAMERA",
-            camera=eid,
-        )
-        acc.claim(eid)
-        acc.available = lambda eid=eid: ctx.available(eid)
-        if not first:
-            continue
-        if bell is not None:
-            # What HomeKit expects of a video doorbell: Doorbell, a programmable
-            # switch for automations, and a speaker.
-            ring = acc.service("Doorbell", primary=True)
-            bind_doorbell(ctx, ring, ctx.entry(bell))
-            switch = acc.service("StatelessProgrammableSwitch")
-            bind_doorbell(ctx, switch, ctx.entry(bell))
-            switch.chars["ProgrammableSwitchEvent"].valid_values = {"SinglePress": 0}
-            acc.service("Speaker").char("Mute", watch=[bell], get=lambda: False)
-        if motion is not None:
-            acc.service("MotionSensor").char(
-                "MotionDetected", watch=[motion], get=lambda: ctx.is_on(motion)
-            )
+    cameras.describe_camera(ctx, cameras_[0], doorbell=bell, motion=motion)
+    for eid in cameras_[1:]:  # e.g. a second lens: its own accessory
+        cameras.describe_camera(ctx, eid, name=ctx.name_of(eid))
 
 
 def doorbell(ctx: HapContext) -> None:
@@ -262,9 +230,6 @@ def buttons(ctx: HapContext) -> None:
         svc.char("ServiceLabelIndex", watch=[eid], get=lambda index=index: index)
 
 
-# StatusLowBattery below this level when there's no low-battery binary sensor.
-LOW_BATTERY_PERCENT = 20
-
 
 # Sensor services that carry StatusLowBattery / StatusTampered / StatusFault.
 _STATUS_SERVICES = {
@@ -293,10 +258,7 @@ def device_status(ctx: HapContext) -> None:
     tamper = ctx.entity("binary_sensor", device_class="tamper")
     problem = ctx.entity("binary_sensor", device_class="problem")
 
-    def is_low() -> int:
-        if low is not None:
-            return int(ctx.is_on(low))
-        return int((ctx.number(level) or 100) < LOW_BATTERY_PERCENT)
+    is_low = low_battery(ctx, level, low)
 
     battery_watch = [e for e in (low, level) if e is not None]
     flags = []
@@ -316,14 +278,8 @@ def device_status(ctx: HapContext) -> None:
         return
     acc = ctx.accessories[0]
     primary = next((s for s in acc.services if s.primary), None)
-    svc = acc.service("BatteryService", linked_to=primary)
-    svc.char("BatteryLevel", watch=[level], get=lambda: ctx.number(level))
-    svc.char("StatusLowBattery", watch=battery_watch, get=is_low)
-    # ChargingState: 0 = not charging, 1 = charging, 2 = not chargeable.
-    if charging is not None:
-        svc.char("ChargingState", watch=[charging], get=lambda: int(ctx.is_on(charging)))
-    else:
-        svc.char("ChargingState", watch=[level], get=lambda: 2)
+    bind_battery(ctx, acc.service("BatteryService", linked_to=primary), level,
+                 low=low, charging=charging)
 
 Profile = Callable[[HapContext], None]
 

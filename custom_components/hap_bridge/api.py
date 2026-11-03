@@ -1,26 +1,30 @@
 """The public API integrations use to describe their devices as HAP accessories.
 
-An integration ships `hap_bridge.py` next to its other platforms:
+An integration ships `hap_bridge.py` next to its other platforms. It doesn't
+import anything from HAP Bridge: everything comes in through `ctx`, so core
+integrations can ship one too and nothing breaks when HAP Bridge isn't
+installed.
 
-    async def async_describe_device(ctx: HapContext) -> None:
+    HAP_BRIDGE_API = 1  # the API version this profile needs (optional)
+
+    async def async_describe_device(ctx) -> None:
         fan = ctx.entity("fan")
+        filter_life = ctx.entity("sensor", translation_key="filter_life")
         if fan is None:
             return
-        acc = ctx.accessory(category="FAN")
-        svc = acc.service("Fanv2", primary=True)
-        svc.char(
-            "Active",
-            watch=[fan],
-            get=lambda: int(ctx.is_on(fan)),
-            set=lambda v: ctx.call("fan", "turn_on" if v else "turn_off", fan),
-        )
+        acc = ctx.accessory(category="AIR_PURIFIER")
+        purifier = ctx.blocks.fan(acc.service("AirPurifier", primary=True), fan)
+        if filter_life:
+            ctx.blocks.filter(acc.service("FilterMaintenance", linked_to=purifier),
+                              life=filter_life)
 
-Service and characteristic names are the raw HAP names from HAP-python's
-bundled definitions ("AirPurifier", "FilterLifeLevel", ...); properties and
-valid values are raw HAP props. The bridge owns IDs, pairing and transport.
+`ctx.blocks` are the bridge's own tested mappings (lights, climate, TVs,
+cameras...). For anything else, bind characteristics directly with
+`svc.char(...)`; `ctx.hap` has the service, characteristic and value names
+(`ctx.hap.Service.AIR_PURIFIER`, `ctx.hap.Active.ACTIVE`).
 
-Specs here are plain data: nothing touches HAP-python until the bridge
-validates and materializes them.
+The bridge owns IDs, pairing and transport. Specs here are plain data:
+nothing touches HAP-python until the bridge validates and materializes them.
 """
 
 from __future__ import annotations
@@ -30,9 +34,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
+    from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, State
     from homeassistant.helpers.device_registry import DeviceEntry
     from homeassistant.helpers.entity_registry import RegistryEntry
+
+# Bumped when the API changes incompatibly. A profile can declare the version
+# it needs as `HAP_BRIDGE_API = n`; older bridges then skip it with a repair
+# issue instead of failing halfway.
+API_VERSION = 1
 
 Getter = Callable[[], Any]
 Setter = Callable[[Any], Awaitable[Any] | None]
@@ -153,6 +165,9 @@ class AccessorySpec:
         # A camera entity to stream and snapshot; the bridge adds the camera
         # services and runs ffmpeg. Implies standalone.
         self.camera = camera
+        # Which step built it, e.g. "integration:acme", "profile:air_purifier",
+        # "fallback". Shown in diagnostics and previews.
+        self.source = ctx.source
         self.services: list[ServiceSpec] = []
         self.info: dict[str, str | None] = {}
         # Overrides the default "No Response" rule; see is_available().
@@ -250,6 +265,49 @@ class HapContext:
         self.settings = settings if settings is not None else Settings()
         self.accessories: list[AccessorySpec] = []
         self._claimed: set[str] = set()
+        # Set by the bridge while each step runs; stamped onto new accessories.
+        self.source = "unknown"
+        self._blocks: Any = None
+
+    api_version = API_VERSION
+
+    @property
+    def blocks(self) -> Any:
+        """The bridge's tested building blocks (see blocks.py)."""
+        if self._blocks is None:
+            from .blocks import Blocks
+
+            self._blocks = Blocks(self)
+        return self._blocks
+
+    @property
+    def hap(self) -> ModuleType:
+        """HomeKit service, characteristic and value names (see hap.py)."""
+        from . import hap
+
+        return hap
+
+    def config_entry(self, domain: str) -> ConfigEntry | None:
+        """The config entry of `domain` this device (or entity) belongs to."""
+        entry_ids: set[str] = set()
+        if self.device is not None:
+            entry_ids.update(getattr(self.device, "config_entries", ()))
+        entry_ids.update(
+            entry_id for e in self.entries if (entry_id := getattr(e, "config_entry_id", None))
+        )
+        for entry_id in sorted(entry_ids):
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if entry is not None and entry.domain == domain:
+                return entry
+        return None
+
+    def runtime_data(self, domain: str) -> Any:
+        """That config entry's runtime_data (a coordinator, client...), or None.
+
+        For profiles that talk to the device directly, beyond its entities.
+        """
+        entry = self.config_entry(domain)
+        return getattr(entry, "runtime_data", None) if entry is not None else None
 
     # -- building -----------------------------------------------------------
 
