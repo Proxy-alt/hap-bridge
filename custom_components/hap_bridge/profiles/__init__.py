@@ -3,7 +3,8 @@
 For every device, in order:
   1. the owning integration's own `hap_bridge.py` platform, if it ships one;
   2. bundled profiles (generic device shapes, then per-integration ones);
-  3. the per-entity fallback for whatever is still unclaimed.
+  3. the per-entity fallback for whatever is still unclaimed;
+  4. finishers (e.g. battery) that add to the accessories built so far.
 Each step only sees entities the previous steps didn't claim.
 """
 
@@ -70,6 +71,8 @@ async def async_collect_specs(hass: HomeAssistant, entry: ConfigEntry) -> list[A
 
             for ent in ctx.unclaimed():
                 fallback.describe_entity(ctx, ent)
+            for finish in generic.FINISHERS:
+                finish(ctx)
 
             specs.extend(ctx.accessories)
 

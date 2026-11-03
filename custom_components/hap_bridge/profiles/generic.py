@@ -3,6 +3,7 @@
 `PROFILES` match on device shape (what entities a device has), so they work
 across integrations. `BY_INTEGRATION` holds ones that only make sense for a
 specific integration's entity layout, keyed by integration domain.
+`FINISHERS` run after the fallback, to add to whatever accessories exist.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..api import HapContext
-from .fallback import bind_fan, bind_light
+from .fallback import bind_fan, bind_light, bind_thermostat
 
 
 def fan_with_light(ctx: HapContext) -> None:
@@ -94,9 +95,60 @@ def air_purifier(ctx: HapContext) -> None:
         aq.char("PM2.5Density", watch=[pm25], get=lambda: ctx.number(pm25))
 
 
+def thermostat(ctx: HapContext) -> None:
+    """A climate entity, with the device's humidity sensor folded in if it has one."""
+    climates = ctx.entities("climate")
+    if ctx.device is None or len(climates) != 1:
+        return
+    humidity = ctx.entity("sensor", device_class="humidity")
+    acc = ctx.accessory(category="THERMOSTAT")
+    bind_thermostat(
+        ctx, acc.service("Thermostat", primary=True), ctx.entry(climates[0]), humidity
+    )
+
+
+# StatusLowBattery below this level when there's no low-battery binary sensor.
+LOW_BATTERY_PERCENT = 20
+
+
+def battery(ctx: HapContext) -> None:
+    """Link a Battery service to the device's tile if it has a battery level sensor."""
+    if ctx.device is None or not ctx.accessories:
+        return
+    level = ctx.entity(
+        "sensor",
+        device_class="battery",
+        predicate=lambda e: e.unit_of_measurement in (None, "%"),
+    )
+    if level is None:
+        return
+    low = ctx.entity("binary_sensor", device_class="battery")
+    charging = ctx.entity("binary_sensor", device_class="battery_charging")
+
+    acc = ctx.accessories[0]
+    primary = next((s for s in acc.services if s.primary), None)
+    svc = acc.service("BatteryService", linked_to=primary)
+    svc.char("BatteryLevel", watch=[level], get=lambda: ctx.number(level))
+    if low is not None:
+        svc.char("StatusLowBattery", watch=[low], get=lambda: int(ctx.is_on(low)))
+    else:
+        svc.char(
+            "StatusLowBattery",
+            watch=[level],
+            get=lambda: int((ctx.number(level) or 100) < LOW_BATTERY_PERCENT),
+        )
+    # ChargingState: 0 = not charging, 1 = charging, 2 = not chargeable.
+    if charging is not None:
+        svc.char("ChargingState", watch=[charging], get=lambda: int(ctx.is_on(charging)))
+    else:
+        svc.char("ChargingState", watch=[level], get=lambda: 2)
+
+
 Profile = Callable[[HapContext], None]
 
 # Purifier first: a purifier is also "a device with one fan".
-PROFILES: list[Profile] = [air_purifier, fan_with_light]
+PROFILES: list[Profile] = [air_purifier, fan_with_light, thermostat]
+
+FINISHERS: list[Profile] = [battery]
 
 BY_INTEGRATION: dict[str, list[Profile]] = {}

@@ -11,7 +11,7 @@ from pytest_homeassistant_custom_component.common import (
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.util import dt as dt_util
 
 from custom_components.hap_bridge.const import (
@@ -137,3 +137,59 @@ async def test_start_failure_raises_repair(hass, config_entry, lamp):
     assert not bridge.started
     issue = ir.async_get(hass).async_get_issue(DOMAIN, f"start_failed_{config_entry.entry_id}")
     assert issue is not None and issue.translation_placeholders["error"] == "boom"
+
+
+async def test_new_profiles_materialize(hass, config_entry, caplog):
+    source = MockConfigEntry(domain="acme")
+    source.add_to_hass(hass)
+    dev_reg, ent_reg = dr.async_get(hass), er.async_get(hass)
+
+    def device(name, *entities):
+        dev = dev_reg.async_get_or_create(
+            config_entry_id=source.entry_id, identifiers={("acme", name)}, name=name
+        )
+        ids = []
+        for domain, uid, state, attrs, kw in entities:
+            ent = ent_reg.async_get_or_create(domain, "acme", uid, device_id=dev.id, **kw)
+            hass.states.async_set(ent.entity_id, state, attrs)
+            ids.append(ent.entity_id)
+        return ids
+
+    climate, _ = device(
+        "Hall",
+        ("climate", "hall", "heat", {"temperature": 21, "current_temperature": 19.5},
+         {"capabilities": {"hvac_modes": ["off", "heat"], "min_temp": 7, "max_temp": 35}}),
+        ("sensor", "hall_hum", "40", {}, {"original_device_class": "humidity"}),
+    )
+    garage, = device(
+        "Garage", ("cover", "garage", "closed", {}, {"original_device_class": "garage"})
+    )
+    bell, = device(
+        "Front", ("event", "bell", "2026-11-01T10:00:00+00:00", {}, {"original_device_class": "doorbell"})
+    )
+    window, _ = device(
+        "Window",
+        ("binary_sensor", "window", "off", {}, {"original_device_class": "window"}),
+        ("sensor", "window_batt", "80", {"unit_of_measurement": "%"},
+         {"original_device_class": "battery", "unit_of_measurement": "%"}),
+    )
+
+    bridge = await _setup(hass, config_entry)
+    assert "Skipping" not in caplog.text
+
+    def services(entity_id):
+        return {s["type"]: s for s in _accessory(bridge, entity_id)["services"]}
+
+    thermostat = services(climate)["Thermostat"]["characteristics"]
+    assert thermostat["TargetTemperature"]["value"] == 21
+    assert thermostat["CurrentRelativeHumidity"]["value"] == 40
+    assert services(garage)["GarageDoorOpener"]["characteristics"]["CurrentDoorState"]["value"] == 1
+    assert "Doorbell" in services(bell)
+    assert services(window)["BatteryService"]["characteristics"]["BatteryLevel"]["value"] == 80
+
+    # HomeKit only offers the modes the entity supports.
+    target = (
+        _hap_accessory(bridge, climate).get_service("Thermostat")
+        .get_characteristic("TargetHeatingCoolingState")
+    )
+    assert target.properties["ValidValues"] == {"Off": 0, "Heat": 1}

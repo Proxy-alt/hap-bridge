@@ -16,7 +16,14 @@ For each device, in order, each step seeing only what earlier steps left:
 1. **The integration's own `hap_bridge.py`**, if it ships one.
 2. **Bundled profiles** in `profiles/generic.py`: matched on device shape
    (e.g. "one fan + a filter-life sensor = purifier") or per integration.
-3. **Fallback**: per-entity mapping similar to core HomeKit Bridge.
+   Today: air purifier, ceiling fan with light, and thermostat (a climate
+   entity, plus the device's humidity sensor if it has one).
+3. **Fallback**: per-entity mapping similar to core HomeKit Bridge: lights,
+   switches/outlets, fans, temperature/humidity sensors, binary sensors,
+   locks, covers (garage doors as garage door openers), climate as
+   thermostats, and doorbell `event` entities as doorbells.
+4. **Finishers** that add to what's been built: a device with a battery level
+   sensor gets a linked Battery service on its tile.
 
 Profiles are checked against HAP-python's service/characteristic catalogue at
 startup; an invalid accessory is skipped with a log line naming the problem.

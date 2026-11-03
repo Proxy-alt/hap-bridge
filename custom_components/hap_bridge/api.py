@@ -278,6 +278,21 @@ class HapContext:
         except ValueError:
             return None
 
+    def to_celsius(self, value: float | None) -> float | None:
+        """HA temperature (in the configured unit system) to HAP's Celsius."""
+        if value is None or not self.uses_fahrenheit():
+            return value
+        return round((value - 32) * 5 / 9, 1)
+
+    def from_celsius(self, value: float) -> float:
+        """HAP Celsius to an HA temperature in the configured unit system."""
+        return round(value * 9 / 5 + 32, 1) if self.uses_fahrenheit() else value
+
+    def uses_fahrenheit(self) -> bool:
+        config = getattr(self.hass, "config", None)
+        units = getattr(config, "units", None)
+        return getattr(units, "temperature_unit", "°C") == "°F"
+
     def call(self, domain: str, service: str, entity_id: str, **data: Any) -> Awaitable[Any]:
         return self.hass.services.async_call(
             domain, service, {"entity_id": entity_id, **data}, blocking=False
