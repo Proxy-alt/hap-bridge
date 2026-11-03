@@ -22,7 +22,7 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
     errors: list[str] = []
     warnings: list[str] = []
 
-    if not spec.services:
+    if not spec.services and spec.camera is None:  # a camera brings its own
         errors.append("no services")
     if sum(1 for s in spec.services if s.primary) > 1:
         errors.append("more than one primary service")

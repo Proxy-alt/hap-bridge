@@ -1,12 +1,21 @@
-"""Turns accessory specs into a running HAP bridge."""
+"""Turns accessory specs into running HomeKit accessories.
+
+One config entry runs one HAP bridge for most accessories, plus one HAP
+server per standalone accessory (TVs, cameras): HomeKit expects those to be
+paired on their own. Each of these "units" has its own port, pairing code
+and pairing state; they share IDs, bindings and Home Assistant listeners.
+"""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import partial
+import hashlib
 import inspect
 import logging
+import socket
 from typing import Any
 
 from pyhap import const as hap_const
@@ -19,12 +28,14 @@ from homeassistant.components import zeroconf
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_PORT
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import STORAGE_DIR, Store
 
 from . import pairing
+from .accessories import SpecAccessory, diagnose
 from .adaptive import CHARACTERISTICS as ADAPTIVE_CHARACTERISTICS, AdaptiveLighting
-from .api import AccessorySpec, CharSpec
+from .api import AccessorySpec, CharSpec, Settings
 from .const import BRIDGE_AID, DOMAIN, MAX_BRIDGED_ACCESSORIES, STORAGE_VERSION
 from .ids import IdRegistry, StableIIDManager
 from .profiles import async_collect_specs
@@ -32,9 +43,28 @@ from .validate import validate_spec
 
 _LOGGER = logging.getLogger(__name__)
 
+# The button platform listens for this to add reset buttons for standalone units.
+SIGNAL_UNITS = f"{DOMAIN}_units_{{}}"
+
+
+@dataclass
+class Unit:
+    """One HAP server: the bridge, or one standalone accessory."""
+
+    id: str
+    name: str
+    driver: _Driver
+    root: Accessory
+    running: bool = False
+    accessories: list[tuple[AccessorySpec, Accessory]] = field(default_factory=list)
+
+    @property
+    def standalone(self) -> bool:
+        return not isinstance(self.root, Bridge)
+
 
 class HapBridge:
-    """One config entry: one HAP bridge, its accessories and state bindings."""
+    """One config entry: its HAP servers, accessories and state bindings."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -50,71 +80,97 @@ class HapBridge:
         )
         self._adaptive_saved: dict[str, Any] = {}
         self._adaptive: list[tuple[str, AdaptiveLighting]] = []
-        self._driver: AccessoryDriver | None = None
-        self._driver_running = False
-        self._bridge: Bridge | None = None
-        self._accessories: list[tuple[AccessorySpec, Accessory]] = []
+        # Values the Home app sets that profiles keep (TV input names, ...).
+        self._settings_store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.settings"
+        )
+        self.units: dict[str, Unit] = {}
         self._bindings: dict[str, list[tuple[Characteristic, CharSpec]]] = defaultdict(list)
-        self._unsub_state = None
+        self._unsub_state: Callable[[], None] | None = None
 
     @property
     def started(self) -> bool:
-        return self._bridge is not None
+        return self.entry.entry_id in self.units
+
+    @property
+    def _bridge_unit(self) -> Unit | None:
+        return self.units.get(self.entry.entry_id)
+
+    # Kept for diagnostics and tests: the bridge's own driver and accessories.
+    @property
+    def _driver(self) -> _Driver | None:
+        return unit.driver if (unit := self._bridge_unit) else None
+
+    @property
+    def _accessories(self) -> list[tuple[AccessorySpec, Accessory]]:
+        return [pair for unit in self.units.values() for pair in unit.accessories]
+
+    # -- starting and stopping ---------------------------------------------------------
 
     async def async_start(self) -> None:
         self._registry = IdRegistry(await self._store.async_load())
         self._adaptive_saved = await self._adaptive_store.async_load() or {}
+        settings_data = await self._settings_store.async_load() or {}
+        settings = Settings(
+            settings_data,
+            lambda: self._settings_store.async_delay_save(lambda: settings_data, 1),
+        )
         zc = await zeroconf.async_get_async_instance(self.hass)
-        self._driver = await self.hass.async_add_executor_job(
-            partial(
-                _Driver,
-                on_paired=self._on_paired,
-                port=self.entry.data[CONF_PORT],
-                persist_file=self.hass.config.path(
-                    STORAGE_DIR, f"{DOMAIN}.{self.entry.entry_id}.state"
-                ),
-                async_zeroconf_instance=zc,
-                loop=self.hass.loop,
-            )
+
+        bridge_unit = await self._async_new_unit(
+            self.entry.entry_id, self.entry.data[CONF_NAME], self.entry.data[CONF_PORT], zc
         )
         bridge = Bridge(
-            self._driver,
-            self.entry.data[CONF_NAME],
+            bridge_unit.driver,
+            bridge_unit.name,
             iid_manager=StableIIDManager(self._registry, BRIDGE_AID),
         )
+        bridge_unit.root = bridge
 
-        specs = await async_collect_specs(self.hass, self.entry)
-        added = 0
+        specs = await async_collect_specs(self.hass, self.entry, settings)
+        standalone: list[AccessorySpec] = []
         seen_keys: set[str] = set()
         for spec in specs:
             # The key decides the AID; a second accessory with the same key would
             # make Bridge.add_accessory raise and take the whole bridge down.
             if spec.key in seen_keys:
-                _LOGGER.error(
-                    "Skipping %s: accessory key %r is already used", spec.name, spec.key
-                )
+                _LOGGER.error("Skipping %s: accessory key %r is already used", spec.name, spec.key)
                 continue
-            errors, warnings = validate_spec(spec, self._driver.loader)
+            errors, warnings = validate_spec(spec, bridge_unit.driver.loader)
             for warning in warnings:
                 _LOGGER.warning("%s (%s): %s", spec.name, spec.key, warning)
             if errors:
                 _LOGGER.error("Skipping %s (%s): %s", spec.name, spec.key, "; ".join(errors))
                 continue
-            if added >= MAX_BRIDGED_ACCESSORIES:
+            seen_keys.add(spec.key)
+            if spec.standalone:
+                standalone.append(spec)
+                continue
+            if len(bridge_unit.accessories) >= MAX_BRIDGED_ACCESSORIES:
                 _LOGGER.warning(
                     "Bridge is full (%s accessories); skipping %s",
-                    MAX_BRIDGED_ACCESSORIES,
-                    spec.name,
+                    MAX_BRIDGED_ACCESSORIES, spec.name,
                 )
                 continue
-            acc = self._materialize(spec)
+            acc = self._materialize(spec, bridge_unit.driver, self._registry.aid(spec.key))
             bridge.add_accessory(acc)
-            self._accessories.append((spec, acc))
-            seen_keys.add(spec.key)
-            added += 1
+            bridge_unit.accessories.append((spec, acc))
+        bridge_unit.driver.add_accessory(bridge)
+        self.units[bridge_unit.id] = bridge_unit
 
-        self._driver.add_accessory(bridge)
-        self._bridge = bridge
+        for spec in standalone:
+            unit_id = f"{self.entry.entry_id}_{hashlib.sha1(spec.key.encode()).hexdigest()[:10]}"
+            port = self._registry.port(spec.key, _port_free, self.entry.data[CONF_PORT] + 1)
+            unit = await self._async_new_unit(unit_id, spec.name, port, zc)
+            # A standalone accessory is always AID 1 on its own server; its IIDs
+            # are still kept per key in the shared registry.
+            acc = self._materialize(spec, unit.driver, hap_const.STANDALONE_AID,
+                                    iid_aid=self._registry.aid(spec.key))
+            unit.root = acc
+            unit.accessories.append((spec, acc))
+            unit.driver.add_accessory(acc)
+            self.units[unit.id] = unit
+
         if self._registry.dirty:
             await self._store.async_save(self._registry.as_dict())
             self._registry.dirty = False
@@ -123,44 +179,34 @@ class HapBridge:
             self._unsub_state = async_track_state_change_event(
                 self.hass, list(self._bindings), self._async_state_changed
             )
-        await self._driver.async_start()
-        self._driver_running = True
+        for unit in self.units.values():
+            await unit.driver.async_start()
+            unit.running = True
+            if unit.driver.state.paired:
+                pairing.async_dismiss(self.hass, unit.id)
+            else:
+                self._async_show_pairing(unit)
         for key, adaptive in self._adaptive:
             adaptive.async_start(self._adaptive_saved.get(key))
-        _LOGGER.info("HAP bridge %s started with %s accessories", bridge.display_name, added)
-
-        if self._driver.state.paired:
-            pairing.async_dismiss(self.hass, self.entry)
-        else:
-            self._async_show_pairing()
-
-    @callback
-    def _async_show_pairing(self) -> None:
-        assert self._driver is not None and self._bridge is not None
-        pairing.async_show(
-            self.hass,
-            self.entry,
-            self._bridge.display_name,
-            self._driver.state.pincode.decode(),
-            self._bridge.xhm_uri(),
+        _LOGGER.info(
+            "HAP bridge %s started with %s accessories and %s standalone",
+            bridge.display_name, len(bridge_unit.accessories), len(standalone),
         )
+        async_dispatcher_send(self.hass, SIGNAL_UNITS.format(self.entry.entry_id))
 
-    def _on_paired(self) -> None:
-        # Called from HAP-python's pairing handler, possibly off the event loop.
-        self.hass.loop.call_soon_threadsafe(pairing.async_dismiss, self.hass, self.entry)
-
-    @callback
-    def async_reset_pairing(self) -> None:
-        """Forget every paired controller so the bridge can be added again."""
-        if self._driver is None:
-            return
-        for client in list(self._driver.state.paired_clients):
-            self._driver.state.remove_paired_client(client)
-        self._driver.async_persist()
-        # The advertisement carries the "paired" flag the Home app looks for.
-        self._driver.async_update_advertisement()
-        self._async_show_pairing()
-        _LOGGER.info("Removed all pairings from %s", self.entry.title)
+    async def _async_new_unit(self, unit_id: str, name: str, port: int, zc: Any) -> Unit:
+        driver = await self.hass.async_add_executor_job(
+            partial(
+                _Driver,
+                on_paired=partial(self._on_paired, unit_id),
+                port=port,
+                persist_file=self.hass.config.path(STORAGE_DIR, f"{DOMAIN}.{unit_id}.state"),
+                async_zeroconf_instance=zc,
+                loop=self.hass.loop,
+            )
+        )
+        # root is set by the caller once the accessories are built
+        return Unit(unit_id, name, driver, root=None)  # type: ignore[arg-type]
 
     async def async_stop(self) -> None:
         for _key, adaptive in self._adaptive:
@@ -169,38 +215,87 @@ class HapBridge:
         if self._unsub_state:
             self._unsub_state()
             self._unsub_state = None
-        if self._driver and self._driver_running:
-            # Stopping a driver that never started fails inside HAP-python,
-            # which matters when async_start gave up halfway.
-            await self._driver.async_stop()
-        self._driver = None
-        self._driver_running = False
-        self._bridge = None
-        self._accessories.clear()
+        for unit in self.units.values():
+            for _spec, acc in unit.accessories:
+                if (stop_streams := getattr(acc, "async_stop_streams", None)) is not None:
+                    await stop_streams()
+            if unit.running:
+                # Stopping a driver that never started fails inside HAP-python,
+                # which matters when async_start gave up halfway.
+                await unit.driver.async_stop()
+                unit.running = False
+        self.units.clear()
         self._bindings.clear()
+
+    # -- pairing --------------------------------------------------------------------------
+
+    @callback
+    def _async_show_pairing(self, unit: Unit) -> None:
+        pairing.async_show(
+            self.hass,
+            unit.id,
+            unit.name,
+            unit.driver.state.pincode.decode(),
+            unit.root.xhm_uri(),
+        )
+
+    def _on_paired(self, unit_id: str | None = None) -> None:
+        # Called from HAP-python's pairing handler, possibly off the event loop.
+        self.hass.loop.call_soon_threadsafe(
+            pairing.async_dismiss, self.hass, unit_id or self.entry.entry_id
+        )
+
+    @callback
+    def async_reset_pairing(self, unit_id: str | None = None) -> None:
+        """Forget every paired controller of a unit (default: the bridge)."""
+        if (unit := self.units.get(unit_id or self.entry.entry_id)) is None:
+            return
+        driver = unit.driver
+        for client in list(driver.state.paired_clients):
+            driver.state.remove_paired_client(client)
+        driver.async_persist()
+        # The advertisement carries the "paired" flag the Home app looks for.
+        driver.async_update_advertisement()
+        self._async_show_pairing(unit)
+        _LOGGER.info("Removed all pairings from %s", unit.name)
+
+    # -- diagnostics -----------------------------------------------------------------------
 
     def diagnostics(self) -> dict[str, Any]:
         """The exposed accessory tree as HomeKit sees it, for debugging profiles."""
-        if self._driver is None or self._bridge is None:
+        if not self.started:
             return {"started": False}
         return {
             "started": True,
-            "paired_clients": len(self._driver.state.paired_clients),
-            "config_version": self._driver.state.config_version,
             "adaptive_lighting": {a.entity_id: a.active for _key, a in self._adaptive},
-            "accessories": [
-                _diagnose_accessory(spec, acc) for spec, acc in self._accessories
+            "units": [
+                {
+                    "name": unit.name,
+                    "standalone": unit.standalone,
+                    "port": unit.driver.state.port,
+                    "paired_clients": len(unit.driver.state.paired_clients),
+                    "config_version": unit.driver.state.config_version,
+                }
+                for unit in self.units.values()
             ],
+            "accessories": [diagnose(spec, acc) for spec, acc in self._accessories],
         }
 
-    def _materialize(self, spec: AccessorySpec) -> Accessory:
-        assert self._driver is not None
-        loader = self._driver.loader
-        aid = self._registry.aid(spec.key)
-        acc = _Accessory(
-            spec, self._driver, spec.name, aid=aid,
-            iid_manager=StableIIDManager(self._registry, aid),
-        )
+    # -- building accessories -------------------------------------------------------------
+
+    def _materialize(
+        self, spec: AccessorySpec, driver: AccessoryDriver, aid: int, iid_aid: int | None = None
+    ) -> Accessory:
+        loader = driver.loader
+        iid_manager = StableIIDManager(self._registry, iid_aid if iid_aid is not None else aid)
+        if spec.camera is not None:
+            from .camera import CameraAccessory  # needs the ffmpeg/camera integrations
+
+            acc: Accessory = CameraAccessory(
+                self.hass, spec, driver, spec.name, aid=aid, iid_manager=iid_manager
+            )
+        else:
+            acc = SpecAccessory(spec, driver, spec.name, aid=aid, iid_manager=iid_manager)
         acc.category = _category(spec.category)
         acc.set_info_service(**{k: str(v) for k, v in spec.info.items() if v})
 
@@ -221,6 +316,8 @@ class HapBridge:
             acc.add_service(service)
             built[id(svc_spec)] = service
 
+            bound: list[tuple[Characteristic, CharSpec]] = []
+            refresh = partial(self._push_all, bound)
             write = svc_spec.write
             if svc_spec.adaptive_light is not None:
                 key = f"{spec.key}|{svc_spec.unique_id or ''}"
@@ -237,7 +334,7 @@ class HapBridge:
                 write = adaptive.wrap_write(write)
             if write is not None:
                 service.setter_callback = self._setter(
-                    f"{spec.name}: writing {svc_spec.type_name}", write
+                    f"{spec.name}: writing {svc_spec.type_name}", write, refresh
                 )
             for name, char_spec in svc_spec.chars.items():
                 char = service.configure_char(
@@ -245,9 +342,10 @@ class HapBridge:
                     properties=char_spec.props or None,
                     valid_values=char_spec.valid_values,
                     setter_callback=char_spec.set and self._setter(
-                        f"{spec.name}: writing {name}", char_spec.set
+                        f"{spec.name}: writing {name}", char_spec.set, refresh
                     ),
                 )
+                bound.append((char, char_spec))
                 self._push(char, char_spec)
                 for entity_id in char_spec.watch:
                     self._bindings[entity_id].append((char, char_spec))
@@ -270,7 +368,9 @@ class HapBridge:
             f"{DOMAIN} save adaptive lighting",
         )
 
-    def _setter(self, label: str, setter: Callable[[Any], Any]) -> Callable[[Any], None]:
+    def _setter(
+        self, label: str, setter: Callable[[Any], Any], refresh: Callable[[], None]
+    ) -> Callable[[Any], None]:
         async def _write(value: Any) -> None:
             try:
                 result = setter(value)
@@ -278,6 +378,9 @@ class HapBridge:
                     await result
             except Exception:  # noqa: BLE001 - one bad write must not kill the bridge
                 _LOGGER.exception("%s=%r failed", label, value)
+            # Re-read the service: a write can change values that no entity
+            # state reflects (e.g. a TV input the Home app just renamed).
+            refresh()
 
         def _on_write(value: Any) -> None:
             # HAP-python may call this off the event loop, and setters are free to
@@ -291,6 +394,11 @@ class HapBridge:
         for char, char_spec in self._bindings.get(event.data["entity_id"], ()):
             self._push(char, char_spec)
 
+    @classmethod
+    def _push_all(cls, bound: list[tuple[Characteristic, CharSpec]]) -> None:
+        for char, char_spec in bound:
+            cls._push(char, char_spec)
+
     @staticmethod
     def _push(char: Characteristic, char_spec: CharSpec) -> None:
         if char_spec.get is None:
@@ -301,52 +409,6 @@ class HapBridge:
                 char.set_value(value)
         except Exception:  # noqa: BLE001 - a broken getter only affects its own value
             _LOGGER.exception("Reading %s failed", char_spec.name)
-
-
-class _Accessory(Accessory):
-    """Accessory whose reachability follows its spec."""
-
-    def __init__(self, spec: AccessorySpec, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._spec = spec
-
-    @property
-    def available(self) -> bool:
-        # False makes reads fail, which the Home app shows as "No Response".
-        try:
-            return self._spec.is_available()
-        except Exception:  # noqa: BLE001 - a broken check must not break reads
-            _LOGGER.exception("%s: availability check failed", self._spec.name)
-            return True
-
-
-def _diagnose_accessory(spec: AccessorySpec, acc: Accessory) -> dict[str, Any]:
-    iid = acc.iid_manager.get_iid
-    services = []
-    for svc in acc.services:
-        services.append(
-            {
-                "type": svc.display_name,
-                "iid": iid(svc),
-                "unique_id": svc.unique_id,
-                "primary": bool(svc.is_primary_service),
-                "linked": [iid(s) for s in svc.linked_services],
-                "characteristics": {
-                    c.display_name: {"iid": iid(c), "value": c.value}
-                    for c in svc.characteristics
-                },
-            }
-        )
-    watched = sorted({eid for s in spec.services for eid in s.watched()})
-    return {
-        "aid": acc.aid,
-        "key": spec.key,
-        "name": spec.name,
-        "category": acc.category,
-        "available": acc.available,
-        "watches": watched,
-        "services": services,
-    }
 
 
 class _Driver(AccessoryDriver):
@@ -363,6 +425,18 @@ class _Driver(AccessoryDriver):
         if success:
             self._on_paired()
         return success
+
+
+def _port_free(port: int) -> bool:
+    """Whether nothing listens on `port` (checked once, when a port is first assigned)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("", port))
+    except OSError:
+        return False
+    except Exception:  # noqa: BLE001 - sockets may be unavailable (e.g. tests)
+        return True
+    return True
 
 
 def _category(category: str | int) -> int:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..api import HapContext
-from . import appliances
+from . import appliances, tv
 from .fallback import (
     AIR_POLLUTANTS,
     bind_air_quality,
@@ -144,6 +144,63 @@ def humidifier(ctx: HapContext) -> None:
     )
 
 
+def television(ctx: HapContext) -> None:
+    """A TV or receiver, with the device's remote entity driving the Remote widget."""
+    if ctx.device is None:
+        return
+    players = ctx.entities("media_player", predicate=tv.is_tv)
+    if not players:
+        return
+    remote = ctx.entity("remote")
+    tv.describe_tv(ctx, ctx.entry(players[0]), remote)
+    if remote is not None:
+        ctx.claim(remote)
+
+
+def activity_remote(ctx: HapContext) -> None:
+    """A remote with activities (e.g. Harmony), when there's no TV on the device."""
+    if ctx.device is None:
+        return
+    if (remote := ctx.entity("remote", predicate=tv.is_activity_remote)) is not None:
+        tv.describe_activity_remote(ctx, ctx.entry(remote))
+        ctx.claim(remote)
+
+
+def camera(ctx: HapContext) -> None:
+    """A camera, as a video doorbell if the device has a doorbell, with its motion sensor."""
+    if ctx.device is None:
+        return
+    cameras = ctx.entities("camera")
+    if not cameras:
+        return
+    bell = ctx.entity("event", device_class="doorbell")
+    motion = ctx.entity("binary_sensor", device_class="motion")
+    for index, eid in enumerate(cameras):
+        first = index == 0
+        acc = ctx.accessory(
+            None if first else ctx.name_of(eid),
+            category="VIDEO_DOOR_BELL" if first and bell else "CAMERA",
+            camera=eid,
+        )
+        acc.claim(eid)
+        acc.available = lambda eid=eid: ctx.available(eid)
+        if not first:
+            continue
+        if bell is not None:
+            # What HomeKit expects of a video doorbell: Doorbell, a programmable
+            # switch for automations, and a speaker.
+            ring = acc.service("Doorbell", primary=True)
+            bind_doorbell(ctx, ring, ctx.entry(bell))
+            switch = acc.service("StatelessProgrammableSwitch")
+            bind_doorbell(ctx, switch, ctx.entry(bell))
+            switch.chars["ProgrammableSwitchEvent"].valid_values = {"SinglePress": 0}
+            acc.service("Speaker").char("Mute", watch=[bell], get=lambda: False)
+        if motion is not None:
+            acc.service("MotionSensor").char(
+                "MotionDetected", watch=[motion], get=lambda: ctx.is_on(motion)
+            )
+
+
 def doorbell(ctx: HapContext) -> None:
     """A doorbell with the device's motion sensor linked to it."""
     if ctx.device is None:
@@ -271,7 +328,9 @@ def device_status(ctx: HapContext) -> None:
 Profile = Callable[[HapContext], None]
 
 # Purifier first: a purifier is also "a device with one fan".
+# Camera before doorbell: a doorbell with a camera is a video doorbell.
 PROFILES: list[Profile] = [
+    camera, television, activity_remote,
     air_purifier, fan_with_light, thermostat, humidifier, doorbell, garage_door,
     air_quality_sensor, buttons,
 ]

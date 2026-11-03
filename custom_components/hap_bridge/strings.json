@@ -30,7 +30,8 @@
   },
   "entity": {
     "button": {
-      "reset_pairing": { "name": "Reset pairing" }
+      "reset_pairing": { "name": "Reset pairing" },
+      "reset_accessory_pairing": { "name": "Reset pairing: {name}" }
     }
   }
 }

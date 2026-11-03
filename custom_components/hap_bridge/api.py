@@ -135,12 +135,24 @@ class ServiceSpec:
 
 class AccessorySpec:
     def __init__(
-        self, ctx: HapContext, key: str, name: str, category: str | int
+        self,
+        ctx: HapContext,
+        key: str,
+        name: str,
+        category: str | int,
+        standalone: bool = False,
+        camera: str | None = None,
     ) -> None:
         self._ctx = ctx
         self.key = key
         self.name = name
         self.category = category
+        # Published as its own HomeKit accessory (own port and pairing code)
+        # instead of behind the bridge. HomeKit expects this for TVs and cameras.
+        self.standalone = standalone
+        # A camera entity to stream and snapshot; the bridge adds the camera
+        # services and runs ffmpeg. Implies standalone.
+        self.camera = camera
         self.services: list[ServiceSpec] = []
         self.info: dict[str, str | None] = {}
         # Overrides the default "No Response" rule; see is_available().
@@ -202,6 +214,26 @@ class AccessorySpec:
         return out
 
 
+class Settings:
+    """Small values the Home app sets and the bridge keeps across restarts,
+    e.g. names given to TV inputs or which inputs are hidden."""
+
+    def __init__(
+        self, data: dict[str, Any] | None = None, save: Callable[[], None] | None = None
+    ) -> None:
+        self.data: dict[str, Any] = data if data is not None else {}
+        self._save = save
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        if self.data.get(key) != value:
+            self.data[key] = value
+            if self._save is not None:
+                self._save()
+
+
 class HapContext:
     """What a profile gets: one device, its entities, and helpers to bind them."""
 
@@ -210,10 +242,12 @@ class HapContext:
         hass: HomeAssistant,
         device: DeviceEntry | None,
         entries: list[RegistryEntry],
+        settings: Settings | None = None,
     ) -> None:
         self.hass = hass
         self.device = device
         self.entries = entries
+        self.settings = settings if settings is not None else Settings()
         self.accessories: list[AccessorySpec] = []
         self._claimed: set[str] = set()
 
@@ -225,10 +259,14 @@ class HapContext:
         *,
         category: str | int = "OTHER",
         key: str | None = None,
+        standalone: bool = False,
+        camera: str | None = None,
     ) -> AccessorySpec:
         """Start an accessory. `key` must be stable; it decides the HomeKit AID.
 
         Defaults to the device ID, suffixed for a second accessory on one device.
+        `standalone` publishes it outside the bridge with its own pairing code
+        (TVs, cameras); `camera` makes it stream that camera entity.
         """
         if key is None:
             if self.device is not None:
@@ -240,7 +278,7 @@ class HapContext:
             key = base if not self.accessories else f"{base}:{len(self.accessories)}"
         if name is None:
             name = self._device_name()
-        acc = AccessorySpec(self, key, name, category)
+        acc = AccessorySpec(self, key, name, category, standalone or camera is not None, camera)
         if self.device is not None:
             acc.info = {
                 "manufacturer": self.device.manufacturer,

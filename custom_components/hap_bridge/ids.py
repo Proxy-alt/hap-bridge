@@ -8,6 +8,7 @@ must never change for the same logical accessory, service or characteristic.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from pyhap.characteristic import Characteristic
@@ -29,6 +30,8 @@ class IdRegistry:
         self._iids: dict[str, dict[str, int]] = {
             aid: dict(iids) for aid, iids in data.get("iids", {}).items()
         }
+        # standalone accessory key -> TCP port, so its HomeKit pairing keeps working
+        self._ports: dict[str, int] = dict(data.get("ports", {}))
         self.dirty = False
 
     def aid(self, key: str) -> int:
@@ -53,8 +56,24 @@ class IdRegistry:
         self.dirty = True
         return iid
 
+    def port(self, key: str, is_free: Callable[[int], bool], start: int) -> int:
+        """Return the port for a standalone accessory, allocating one if new."""
+        if (port := self._ports.get(key)) is not None:
+            return port
+        used = set(self._ports.values())
+        port = start
+        while port in used or not is_free(port):
+            port += 1
+        self._ports[key] = port
+        self.dirty = True
+        return port
+
     def as_dict(self) -> dict[str, Any]:
-        return {"aids": dict(self._aids), "iids": {a: dict(i) for a, i in self._iids.items()}}
+        return {
+            "aids": dict(self._aids),
+            "iids": {a: dict(i) for a, i in self._iids.items()},
+            "ports": dict(self._ports),
+        }
 
 
 def service_key(type_id: Any, unique_id: str | None) -> str:

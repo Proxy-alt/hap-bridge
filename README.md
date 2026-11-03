@@ -17,6 +17,10 @@ For each device, in order, each step seeing only what earlier steps left:
 2. **Bundled profiles** in `profiles/generic.py`: matched on device shape
    (e.g. "one fan + a filter-life sensor = purifier") or per integration.
    Today:
+   - TVs and receivers, and activity remotes such as Harmony, as Televisions
+     (see below)
+   - cameras, as video doorbells when the device has a doorbell, with the
+     device's motion sensor (see below)
    - air purifier, with filter life, a "replace filter" sensor and a
      "reset filter" button if the device has them
    - ceiling fan with light
@@ -106,6 +110,45 @@ async def async_describe_device(ctx: HapContext) -> None:
 - `ctx.accessory(key=...)` decides the AID. The default (the device ID) is
   stable; only override it with something equally stable.
 
+## TVs and cameras
+
+TVs, receivers, activity remotes and cameras are **standalone accessories**.
+HomeKit expects them to be paired on their own rather than behind a bridge,
+the same way core HomeKit and Homebridge publish them. Each one gets:
+- its own port, kept across restarts;
+- its own pairing notification with a QR code;
+- its own **Reset pairing** button on the bridge's device.
+
+Add each one in the Home app the same way you added the bridge.
+
+**TVs** (media players with the `tv` or `receiver` device class, or from a TV
+integration below) get:
+- power, inputs (the source list, including apps) and the current input;
+- play/pause state;
+- volume: the iPhone's volume buttons while the Remote is open, mute, and a
+  volume level where the TV supports one;
+- the **Remote** in Control Center: arrows, select, back, exit, info,
+  rewind/fast-forward and play/pause. Keys go to the TV's own remote entity
+  (or `webostv.button` for LG) for Android TV, Apple TV, Roku, Samsung,
+  Philips and LG. Play/pause always goes through the media player.
+  - Every key press also fires a `hap_bridge_tv_remote_key` event (`entity_id`,
+    `key`, `handled`), so automations can handle keys for other TVs.
+- **View TV Settings** in the Home app opens the TV's settings or menu, where
+  the integration has a key for it.
+- names you give the TV and its inputs in the Home app, and inputs you hide
+  there, are kept across restarts.
+
+Activity remotes (e.g. Harmony) work the same way, with their activities as
+the inputs.
+
+**Cameras** stream live video to the Home app and provide snapshots. They use
+the camera's stream source with ffmpeg, as core HomeKit does.
+- If the device also has a doorbell `event` entity, the camera becomes a video
+  doorbell, and rings show on your devices with a snapshot.
+- If the device has a motion binary sensor, it's added for motion
+  notifications.
+- Video only for now: no audio, and no HomeKit Secure Video recording.
+
 ## Adaptive Lighting
 
 Lights with color temperature offer Adaptive Lighting in the Home app. HomeKit
@@ -179,6 +222,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 - **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
-- **No standalone (non-bridged) accessory mode** for cameras and TVs.
+- **Cameras have no audio and no HomeKit Secure Video.** Live video and snapshots only.
+- **Plain speakers aren't exposed.** HomeKit has no useful service for them (only AirPlay speakers show up properly).
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
 - **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.

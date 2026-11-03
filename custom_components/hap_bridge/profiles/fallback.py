@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..api import HapContext, ServiceSpec
-from . import appliances
+from . import appliances, tv
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_registry import RegistryEntry
@@ -595,6 +595,23 @@ def _valve(ctx: HapContext, ent: RegistryEntry) -> None:
         appliances.bind_valve(ctx, _accessory(ctx, ent, "FAUCET").service("Valve", primary=True), ent)
 
 
+def _media_player(ctx: HapContext, ent: RegistryEntry) -> None:
+    if tv.is_tv(ent):
+        tv.describe_tv(ctx, ent)
+
+
+def _remote(ctx: HapContext, ent: RegistryEntry) -> None:
+    if tv.is_activity_remote(ent):
+        tv.describe_activity_remote(ctx, ent)
+
+
+def _camera(ctx: HapContext, ent: RegistryEntry) -> None:
+    eid = ent.entity_id
+    acc = ctx.accessory(ctx.name_of(eid), category="CAMERA", key=f"entity:{ent.id}", camera=eid)
+    acc.claim(eid)
+    acc.available = lambda: ctx.available(eid)
+
+
 def _button(ctx: HapContext, ent: RegistryEntry) -> None:
     # Restart/update/identify buttons are maintenance, not something to tap in Home.
     if _device_class(ent) not in ("restart", "update", "identify"):
@@ -643,4 +660,7 @@ _BUILDERS: dict[str, Callable[[HapContext, RegistryEntry], None]] = {
     "script": _switch,
     "select": _select,
     "input_select": _select,
+    "media_player": _media_player,
+    "remote": _remote,
+    "camera": _camera,
 }

@@ -27,6 +27,7 @@ def _auto(enable_custom_integrations, mock_async_zeroconf):
         patch("custom_components.hap_bridge.bridge._Driver.async_update_advertisement"),
         patch("custom_components.hap_bridge.bridge._Driver.persist"),
         patch("pyhap.util.get_local_address", return_value="127.0.0.1"),
+        patch("custom_components.hap_bridge.bridge._port_free", return_value=True),
     ):
         yield
 

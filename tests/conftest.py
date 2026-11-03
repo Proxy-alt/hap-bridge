@@ -42,9 +42,17 @@ class FakeServices:
         return None
 
 
+class FakeBus:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def async_fire(self, event_type, data=None):
+        self.events.append((event_type, data or {}))
+
+
 @pytest.fixture
 def hass():
-    return SimpleNamespace(states=FakeStates(), services=FakeServices())
+    return SimpleNamespace(states=FakeStates(), services=FakeServices(), bus=FakeBus())
 
 
 def make_entry(entity_id: str, **kw: Any) -> SimpleNamespace:

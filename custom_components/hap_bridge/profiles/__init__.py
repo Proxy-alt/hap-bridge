@@ -21,7 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.loader import async_get_integration
 
-from ..api import AccessorySpec, HapContext
+from ..api import AccessorySpec, HapContext, Settings
 from ..const import (
     CONF_EXCLUDE_DEVICES,
     CONF_EXCLUDE_ENTITIES,
@@ -35,7 +35,9 @@ from . import fallback, generic
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_collect_specs(hass: HomeAssistant, entry: ConfigEntry) -> list[AccessorySpec]:
+async def async_collect_specs(
+    hass: HomeAssistant, entry: ConfigEntry, settings: Settings | None = None
+) -> list[AccessorySpec]:
     dev_reg = dr.async_get(hass)
 
     by_device: dict[str | None, list[er.RegistryEntry]] = defaultdict(list)
@@ -50,9 +52,9 @@ async def async_collect_specs(hass: HomeAssistant, entry: ConfigEntry) -> list[A
         if device_id is None:
             # Device-less entities (helpers, templates) each get their own context
             # so they never get grouped by accident.
-            contexts = [HapContext(hass, None, [e]) for e in entries]
+            contexts = [HapContext(hass, None, [e], settings) for e in entries]
         else:
-            contexts = [HapContext(hass, dev_reg.async_get(device_id), entries)]
+            contexts = [HapContext(hass, dev_reg.async_get(device_id), entries, settings)]
 
         for ctx in contexts:
             for domain in sorted({e.platform for e in ctx.entries}):
