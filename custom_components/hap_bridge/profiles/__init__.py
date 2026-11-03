@@ -1,6 +1,8 @@
 """Decide how each device is exposed.
 
 For every device, in order:
+  0. the best-matching shim, if any (a profile someone else wrote for it;
+     see shims.py);
   1. the owning integration's own `hap_bridge.py` platform, if it ships one;
   2. bundled profiles (generic device shapes, then per-integration ones);
   3. the per-entity fallback for whatever is still unclaimed;
@@ -17,6 +19,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import inspect
 import logging
 from types import ModuleType
 from typing import Any
@@ -35,6 +38,7 @@ from ..const import (
     DOMAIN,
     PLATFORM,
 )
+from ..shims import LoadedShims, Shim, best_shims
 from . import fallback, generic
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,11 +46,13 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class Problem:
-    """Something wrong with an integration's own profile."""
+    """Something wrong with an integration's own profile, or with a shim."""
 
-    integration: str
+    integration: str  # the integration, or for shims the shim's name
     message: str
     device: str | None = None
+    shim: bool = False
+    origin: str | None = None  # a shim's file or pack
 
 
 @dataclass
@@ -64,10 +70,14 @@ async def async_collect_specs(
     *,
     device_id: str | None = None,
     entity_id: str | None = None,
+    shims: LoadedShims | None = None,
 ) -> Collection:
     """Describe every included device; or only one device or entity (previews)."""
     dev_reg = dr.async_get(hass)
     result = Collection()
+    if shims is not None:
+        for name, origin, message in shims.errors:
+            result.problems.append(Problem(name, message, shim=True, origin=origin))
 
     by_device: dict[str | None, list[er.RegistryEntry]] = defaultdict(list)
     for ent in er.async_get(hass).entities.values():
@@ -92,6 +102,8 @@ async def async_collect_specs(
             contexts = [HapContext(hass, dev_reg.async_get(dev_id), entries, settings)]
 
         for ctx in contexts:
+            if shims is not None:
+                await _async_run_shim(ctx, shims.shims, result)
             for domain in sorted({e.platform for e in ctx.entries}):
                 module = await _async_platform(hass, platforms, domain, result)
                 if module is not None:
@@ -119,34 +131,72 @@ async def async_collect_specs(
     return result
 
 
+async def _async_run_shim(ctx: HapContext, shims: list[Shim], result: Collection) -> None:
+    shim, tied = best_shims(shims, ctx)
+    device = ctx.device.id if ctx.device else None
+    if tied:
+        names = ", ".join(t.name for t in tied)
+        for t in tied:
+            result.problems.append(Problem(
+                t.name,
+                f"matches {ctx.device.name if ctx.device else 'an entity'} as specifically "
+                f"as {names}; make one HANDLES more specific (neither runs meanwhile)",
+                device, shim=True, origin=t.origin,
+            ))
+        return
+    if shim is None:
+        return
+
+    def problem(message: str) -> Problem:
+        return Problem(shim.name, message, device, shim=True, origin=shim.origin)
+
+    await _async_run(ctx, shim.source, shim.describe, shim.api, problem, result)
+
+
 async def _async_run_integration(
     ctx: HapContext, domain: str, module: ModuleType, result: Collection
 ) -> None:
-    """Run an integration's own profile; on failure undo what it did and record why."""
     device = ctx.device.id if ctx.device else None
+
+    def problem(message: str) -> Problem:
+        return Problem(domain, message, device)
+
     describe = getattr(module, "async_describe_device", None)
     if describe is None:
-        result.problems.append(Problem(domain, f"{PLATFORM}.py has no async_describe_device", device))
+        result.problems.append(problem(f"{PLATFORM}.py has no async_describe_device"))
         return
-    needed = getattr(module, "HAP_BRIDGE_API", API_VERSION)
-    if needed > API_VERSION:
-        result.problems.append(Problem(
-            domain,
-            f"needs HAP Bridge API version {needed}; this HAP Bridge has {API_VERSION}. "
-            "Update HAP Bridge to use it.",
-            device,
+    await _async_run(
+        ctx, f"integration:{domain}", describe, getattr(module, "HAP_BRIDGE_API", API_VERSION),
+        problem, result,
+    )
+
+
+async def _async_run(
+    ctx: HapContext,
+    source: str,
+    describe: Any,
+    needed_api: int,
+    problem: Any,
+    result: Collection,
+) -> None:
+    """Run a profile; on failure undo what it did and record why."""
+    if needed_api > API_VERSION:
+        result.problems.append(problem(
+            f"needs HAP Bridge API version {needed_api}; this HAP Bridge has {API_VERSION}. "
+            "Update HAP Bridge to use it."
         ))
         return
-    ctx.source = f"integration:{domain}"
+    ctx.source = source
     before_accessories, before_claimed = len(ctx.accessories), set(ctx._claimed)
     try:
-        await describe(ctx)
+        if inspect.isawaitable(outcome := describe(ctx)):
+            await outcome
     except Exception as err:  # noqa: BLE001 - a broken profile falls back
-        _LOGGER.exception("%s.%s failed; using the bridge's own mapping", domain, PLATFORM)
-        # Undo whatever it built, so the bundled profiles and fallback see everything.
+        _LOGGER.exception("%s failed; using the next step instead", source)
+        # Undo whatever it built, so later steps see everything.
         del ctx.accessories[before_accessories:]
         ctx._claimed = before_claimed
-        result.problems.append(Problem(domain, f"{type(err).__name__}: {err}", device))
+        result.problems.append(problem(f"{type(err).__name__}: {err}"))
 
 
 def exclusion_reason(options: Mapping[str, Any], ent: er.RegistryEntry) -> str | None:

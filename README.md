@@ -192,6 +192,60 @@ incompatible changes. Set `HAP_BRIDGE_API` to the version your profile needs.
 An older bridge then skips the profile with a repair issue instead of breaking
 on it.
 
+## Shims: profiles for integrations you don't maintain
+
+Most integrations don't ship a `hap_bridge.py` yet. A **shim** is the same
+kind of profile, written by you or the community, for someone else's
+integration or for specific device models. It uses the same
+`async_describe_device(ctx)`, blocks, `ctx.hap`, preview, test kit and repair
+issues, so a good shim can later be copied into the integration unchanged.
+
+```python
+# <config>/hap_bridge/profiles/ikea_starkvind.py
+HANDLES = {"integration": "zha", "manufacturer": "IKEA*", "model": "STARKVIND*"}
+
+async def async_describe_device(ctx):
+    ...
+```
+
+**Which devices.** `HANDLES` patterns are case-insensitive, with `*` and `?`
+as wildcards, and every key given must match. It can also be a list of these.
+Without `HANDLES`, a shim handles the integration it's named after (`acme.py`
+→ the `acme` integration). Matching by manufacturer and model is what makes
+shims useful for Zigbee, Z-Wave, Matter and MQTT devices, where one
+integration covers thousands of products.
+
+**Where shims come from.**
+- **Files** in `<config>/hap_bridge/profiles/*.py`. They're re-read on every
+  bridge start and every preview, so edit → preview → reload is quick, with no
+  restart. They're Python run by Home Assistant, the same trust as anything
+  in `custom_components`: only add files you'd trust there. See
+  [examples/shims/ikea_starkvind.py](examples/shims/ikea_starkvind.py).
+- **Profile packs.** Any integration (for example a community collection
+  from HACS) can ship a `hap_bridge_shims.py` with a `SHIMS` list of `{"name",
+  "handles", "describe"}` entries. See
+  [examples/shims/hap_bridge_shims.py](examples/shims/hap_bridge_shims.py).
+  A pack set up after the bridge starts makes the bridge reload to use it.
+
+**What runs.** Per device, the most specific matching shim runs before
+everything else, including the integration's own profile:
+- A model match beats a manufacturer match, which beats an integration match.
+- If two shims match equally, neither runs, and both get a repair issue
+  saying to make one `HANDLES` more specific.
+- Whatever a shim leaves unclaimed goes on to the integration's profile, the
+  bundled profiles and the fallback.
+- Accessories it builds show as `shim:<name>` in previews and diagnostics.
+
+**When a shim breaks.** If a shim raises, fails to load, has bad `HANDLES`,
+or builds something HomeKit would reject, what it built is undone and the
+device falls back to the next step. A repair issue names the shim and its file
+or pack, and clears on the next clean start.
+
+**Keep HomeKit IDs stable.** HomeKit IDs follow accessory keys. Leave
+`ctx.accessory()`'s default key (the device ID) unless you must change it.
+Otherwise the Home app sees a new accessory, and rooms and automations
+pointing at the old one stop working.
+
 ## TVs and cameras
 
 TVs, receivers, activity remotes and cameras are **standalone accessories**.

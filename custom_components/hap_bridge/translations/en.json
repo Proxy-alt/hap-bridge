@@ -27,6 +27,10 @@
       "title": "{integration}'s HomeKit profile has problems",
       "description": "The {integration} integration describes its devices for HomeKit, but on bridge {bridge} that description failed:\n\n{problems}\n\nThose devices still appear in HomeKit using the bridge's own mapping. If you develop {integration}, the `hap_bridge.preview` action shows what HomeKit gets for a device. Otherwise, report this to the integration's authors."
     },
+    "shim_error": {
+      "title": "HomeKit shim {shim} has problems",
+      "description": "The shim {shim} ({origin}) describes devices for HomeKit, but on bridge {bridge} it failed:\n\n{problems}\n\nThose devices still appear in HomeKit without it. Fix the shim, check it with the `hap_bridge.preview` action, then reload the bridge."
+    },
     "start_failed": {
       "title": "HAP Bridge {name} failed to start",
       "description": "The bridge could not start, so its accessories are unavailable in HomeKit.\n\nError: {error}\n\nCheck the log for details, then reload the integration."

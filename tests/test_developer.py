@@ -177,3 +177,33 @@ async def test_example_profile_is_valid():
     assert values["AirQualitySensor.AirQuality"] == 2
     await result.async_write(result.accessory(), "FilterMaintenance", "ResetFilterIndication", 1)
     assert hass.services.calls[-1] == ("button", "press", {"entity_id": "button.p_reset"})
+
+
+@run
+async def test_example_shims_are_valid():
+    def load(name):
+        spec = importlib.util.spec_from_file_location(name, ROOT / "examples" / "shims" / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    hass = testing.FakeHass()
+    hass.states.set("fan.s", "on", percentage=20, preset_mode="Auto")
+    hass.states.set("sensor.s_pm25", "4")
+    hass.states.set("binary_sensor.s_replace_filter", "off")
+    result = await testing.async_describe(load("ikea_starkvind").async_describe_device, [
+        testing.entry("fan.s", supported_features=1),
+        testing.entry("sensor.s_pm25", device_class="pm25"),
+        testing.entry("binary_sensor.s_replace_filter"),
+    ], hass=hass)
+    result.assert_valid()
+    assert result.values(result.accessory())["AirPurifier.TargetAirPurifierState"] == 1
+
+    pack = load("hap_bridge_shims")
+    hass.states.set("vacuum.robo", "docked")
+    hass.states.set("sensor.robo_battery", "80")
+    result = await testing.async_describe(pack.SHIMS[0]["describe"], [
+        testing.entry("vacuum.robo"),
+        testing.entry("sensor.robo_battery", device_class="battery"),
+    ], hass=hass)
+    result.assert_valid()

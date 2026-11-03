@@ -39,6 +39,7 @@ from .api import AccessorySpec, CharSpec, Settings
 from .const import BRIDGE_AID, DOMAIN, MAX_BRIDGED_ACCESSORIES, STORAGE_VERSION
 from .ids import IdRegistry, StableIIDManager
 from .profiles import Problem, async_collect_specs
+from .shims import async_load_shims
 from .validate import validate_spec
 
 _LOGGER = logging.getLogger(__name__)
@@ -131,7 +132,9 @@ class HapBridge:
         )
         bridge_unit.root = bridge
 
-        collection = await async_collect_specs(self.hass, self.entry, settings)
+        collection = await async_collect_specs(
+            self.hass, self.entry, settings, shims=await async_load_shims(self.hass)
+        )
         self.excluded = collection.excluded
         self.problems = collection.problems
         standalone: list[AccessorySpec] = []
@@ -147,9 +150,10 @@ class HapBridge:
                 _LOGGER.warning("%s (%s): %s", spec.name, spec.key, warning)
             if errors:
                 _LOGGER.error("Skipping %s (%s): %s", spec.name, spec.key, "; ".join(errors))
-                if spec.source.startswith("integration:"):
+                kind, _, owner = spec.source.partition(":")
+                if kind in ("integration", "shim"):
                     self.problems.append(Problem(
-                        spec.source.split(":", 1)[1], f"{spec.name}: {'; '.join(errors)}"
+                        owner, f"{spec.name}: {'; '.join(errors)}", shim=kind == "shim"
                     ))
                 continue
             seen_keys.add(spec.key)
@@ -292,7 +296,8 @@ class HapBridge:
             "accessories": [diagnose(spec, acc) for spec, acc in self._accessories],
             "excluded": dict(sorted(self.excluded.items())),
             "profile_problems": [
-                {"integration": p.integration, "device": p.device, "problem": p.message}
+                {("shim" if p.shim else "integration"): p.integration, "device": p.device,
+                 "problem": p.message, **({"origin": p.origin} if p.origin else {})}
                 for p in self.problems
             ],
         }

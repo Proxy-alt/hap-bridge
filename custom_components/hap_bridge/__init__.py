@@ -23,6 +23,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.debounce import Debouncer
+from homeassistant.helpers.integration_platform import async_process_integration_platforms
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 import voluptuous as vol
@@ -31,6 +32,7 @@ from . import issues
 from .bridge import HapBridge
 from .const import DOMAIN, REGISTRY_RELOAD_COOLDOWN
 from .preview import async_preview
+from .shims import DATA_PACKS, PACK_PLATFORM, read_pack
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +62,18 @@ PREVIEW_SCHEMA = vol.All(
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    @callback
+    def _register_pack(hass: HomeAssistant, domain: str, platform: Any) -> None:
+        pack = read_pack(domain, platform)
+        hass.data.setdefault(DATA_PACKS, {})[domain] = pack
+        _LOGGER.info("Shim pack %s: %s shims", domain, len(pack.shims))
+        # A pack set up after the bridges started: rebuild them to use it.
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+            if entry.runtime_data.started:
+                hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    await async_process_integration_platforms(hass, PACK_PLATFORM, _register_pack)
+
     async def _preview(call: ServiceCall) -> ServiceResponse:
         entry = _preview_entry(hass, call.data.get("config_entry_id"))
         return await async_preview(
