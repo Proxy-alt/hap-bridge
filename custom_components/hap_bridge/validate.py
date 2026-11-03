@@ -67,6 +67,15 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
             if name != "Name" and (name not in svc.chars or svc.chars[name].get is None):
                 warnings.append(f"{svc.type_name}.{name} is required but never set")
 
+        if svc.adaptive_light is not None and (
+            svc.type_name != "Lightbulb"
+            or not {"Brightness", "ColorTemperature"} <= set(svc.chars)
+            or svc.write is None
+        ):
+            errors.append(
+                "Adaptive Lighting needs a Lightbulb with Brightness, ColorTemperature and on_write"
+            )
+
         for linked in svc.linked:
             if linked not in spec.services:
                 errors.append(f"{svc.type_name} links a service from another accessory")

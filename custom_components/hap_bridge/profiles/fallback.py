@@ -97,6 +97,7 @@ def bind_light(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
             return round(1_000_000 / kelvin) if kelvin else None
 
         svc.char("ColorTemperature", watch=[eid], get=mireds, props=props)
+        svc.adaptive_lighting(eid)
 
 
 def _scale(value: float | None, source_max: float, target_max: float) -> int | None:

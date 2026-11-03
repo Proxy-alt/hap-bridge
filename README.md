@@ -21,7 +21,8 @@ For each device, in order, each step seeing only what earlier steps left:
    of a device's pollutant sensors in one tile, rated by the worst), and
    multi-button remotes (one accessory with a numbered switch per button).
 3. **Fallback**: per-entity mapping similar to core HomeKit Bridge:
-   - lights, with brightness, hue/saturation and color temperature
+   - lights, with brightness, hue/saturation and color temperature, plus
+     Adaptive Lighting for lights with color temperature (see below)
    - switches and outlets
    - fans, with oscillation, direction and an auto preset
    - temperature, humidity, light level, CO and CO2 sensors
@@ -87,6 +88,29 @@ async def async_describe_device(ctx: HapContext) -> None:
 - `ctx.accessory(key=...)` decides the AID. The default (the device ID) is
   stable; only override it with something equally stable.
 
+## Adaptive Lighting
+
+Lights with color temperature offer Adaptive Lighting in the Home app. HomeKit
+bulbs run the schedule themselves, so here the bridge does it for them:
+
+- It works out the color temperature from the schedule and the light's
+  brightness, and sends it with `light.turn_on` at the interval the Home app
+  asks for (usually every minute).
+- An off light is skipped. Home Assistant can't change its color without
+  turning it on, so it gets the right temperature as it turns on. When the
+  Home app turns it on, that happens in the same call; when something else
+  does, it's corrected straight after.
+- Choosing a color or white by hand switches Adaptive Lighting off, the same
+  as on a real bulb. This applies in the Home app or anywhere in Home
+  Assistant (the dashboard, automations, a wall switch).
+- The schedule is saved, so restarts and reloads pick it up again.
+
+The protocol isn't published by Apple. This follows HAP-NodeJS's
+reverse-engineered `AdaptiveLightingController`; see `transition.py`.
+
+A profile turns it on with `svc.adaptive_lighting(light_entity_id)` on a
+Lightbulb that has Brightness, ColorTemperature and an `on_write`.
+
 ## Stable IDs
 
 Home keys rooms, scenes and automations on AID/IID. AIDs are keyed on the
@@ -134,7 +158,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 
 ## Not done yet
 
-- **Not yet paired with a real Home app.** The HA tests stub out the HAP server.
+- **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
 - **No standalone (non-bridged) accessory mode** for cameras and TVs.

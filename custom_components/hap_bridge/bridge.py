@@ -23,6 +23,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import STORAGE_DIR, Store
 
 from . import pairing
+from .adaptive import CHARACTERISTICS as ADAPTIVE_CHARACTERISTICS, AdaptiveLighting
 from .api import AccessorySpec, CharSpec
 from .const import BRIDGE_AID, DOMAIN, MAX_BRIDGED_ACCESSORIES, STORAGE_VERSION
 from .ids import IdRegistry, StableIIDManager
@@ -42,6 +43,13 @@ class HapBridge:
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.ids"
         )
         self._registry = IdRegistry()
+        # Active Adaptive Lighting schedules, by accessory key + service, so a
+        # restart or reload picks them up again.
+        self._adaptive_store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.adaptive"
+        )
+        self._adaptive_saved: dict[str, Any] = {}
+        self._adaptive: list[tuple[str, AdaptiveLighting]] = []
         self._driver: AccessoryDriver | None = None
         self._driver_running = False
         self._bridge: Bridge | None = None
@@ -55,6 +63,7 @@ class HapBridge:
 
     async def async_start(self) -> None:
         self._registry = IdRegistry(await self._store.async_load())
+        self._adaptive_saved = await self._adaptive_store.async_load() or {}
         zc = await zeroconf.async_get_async_instance(self.hass)
         self._driver = await self.hass.async_add_executor_job(
             partial(
@@ -116,6 +125,8 @@ class HapBridge:
             )
         await self._driver.async_start()
         self._driver_running = True
+        for key, adaptive in self._adaptive:
+            adaptive.async_start(self._adaptive_saved.get(key))
         _LOGGER.info("HAP bridge %s started with %s accessories", bridge.display_name, added)
 
         if self._driver.state.paired:
@@ -152,6 +163,9 @@ class HapBridge:
         _LOGGER.info("Removed all pairings from %s", self.entry.title)
 
     async def async_stop(self) -> None:
+        for _key, adaptive in self._adaptive:
+            adaptive.async_stop()
+        self._adaptive.clear()
         if self._unsub_state:
             self._unsub_state()
             self._unsub_state = None
@@ -173,6 +187,7 @@ class HapBridge:
             "started": True,
             "paired_clients": len(self._driver.state.paired_clients),
             "config_version": self._driver.state.config_version,
+            "adaptive_lighting": {a.entity_id: a.active for _key, a in self._adaptive},
             "accessories": [
                 _diagnose_accessory(spec, acc) for spec, acc in self._accessories
             ],
@@ -199,12 +214,30 @@ class HapBridge:
             for name in svc_spec.chars:
                 if name not in present:
                     service.add_characteristic(loader.get_char(name))
+            if svc_spec.adaptive_light is not None:
+                for name in ADAPTIVE_CHARACTERISTICS:
+                    if name not in present:
+                        service.add_characteristic(loader.get_char(name))
             acc.add_service(service)
             built[id(svc_spec)] = service
 
-            if svc_spec.write is not None:
+            write = svc_spec.write
+            if svc_spec.adaptive_light is not None:
+                key = f"{spec.key}|{svc_spec.unique_id or ''}"
+                adaptive = AdaptiveLighting(
+                    self.hass,
+                    spec.name,
+                    svc_spec.adaptive_light,
+                    service,
+                    acc.iid_manager.get_iid,
+                    partial(self._save_adaptive, key),
+                )
+                self._adaptive.append((key, adaptive))
+                assert write is not None  # checked by validate_spec
+                write = adaptive.wrap_write(write)
+            if write is not None:
                 service.setter_callback = self._setter(
-                    f"{spec.name}: writing {svc_spec.type_name}", svc_spec.write
+                    f"{spec.name}: writing {svc_spec.type_name}", write
                 )
             for name, char_spec in svc_spec.chars.items():
                 char = service.configure_char(
@@ -226,6 +259,16 @@ class HapBridge:
             for linked in svc_spec.linked:
                 service.add_linked_service(built[id(linked)])
         return acc
+
+    def _save_adaptive(self, key: str, transition: dict[str, Any] | None) -> None:
+        if transition is None:
+            self._adaptive_saved.pop(key, None)
+        else:
+            self._adaptive_saved[key] = transition
+        self.hass.async_create_task(
+            self._adaptive_store.async_save(dict(self._adaptive_saved)),
+            f"{DOMAIN} save adaptive lighting",
+        )
 
     def _setter(self, label: str, setter: Callable[[Any], Any]) -> Callable[[Any], None]:
         async def _write(value: Any) -> None:

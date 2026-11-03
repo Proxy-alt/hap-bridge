@@ -60,6 +60,7 @@ class ServiceSpec:
         self.chars: dict[str, CharSpec] = {}
         self.linked: list[ServiceSpec] = []
         self.write: Callable[[dict[str, Any]], Awaitable[Any] | None] | None = None
+        self.adaptive_light: str | None = None
 
     @property
     def unique_id(self) -> str | None:
@@ -118,6 +119,17 @@ class ServiceSpec:
         writable through it. It may return a coroutine.
         """
         self.write = write
+        return self
+
+    def adaptive_lighting(self, light_entity_id: str) -> ServiceSpec:
+        """Offer Adaptive Lighting on this Lightbulb, run by the bridge.
+
+        Needs Brightness, ColorTemperature and an `on_write` that turns
+        ColorTemperature (mireds) into the light's color temperature. The
+        bridge then follows the Home app's schedule by calling light.turn_on
+        on `light_entity_id`, and stops when a color is chosen by hand.
+        """
+        self.adaptive_light = light_entity_id
         return self
 
 
