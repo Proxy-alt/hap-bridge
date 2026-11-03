@@ -1,0 +1,11 @@
+[project]
+name = "hap-bridge"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+[project.optional-dependencies]
+test = ["pytest", "HAP-python>=4.9.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

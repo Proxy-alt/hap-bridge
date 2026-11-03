@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HAP Bridge",
+        "description": "Creates a HomeKit bridge. Integrations that ship a hap_bridge.py describe their own devices; everything else uses a standard mapping.",
+        "data": { "name": "Bridge name", "port": "Port" }
+      }
+    },
+    "abort": { "already_configured": "A bridge already uses this port." }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Exposed integrations",
+        "data": { "include_integrations": "Only expose devices from these integrations (empty = all)" }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "domain": "hap_bridge",
+  "name": "HAP Bridge",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["zeroconf"],
+  "documentation": "https://github.com/OWNER/hap-bridge",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/OWNER/hap-bridge/issues",
+  "loggers": ["pyhap"],
+  "requirements": ["HAP-python>=4.9.2"],
+  "version": "0.1.0"
+}
