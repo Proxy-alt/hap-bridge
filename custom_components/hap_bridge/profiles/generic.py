@@ -11,11 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..api import HapContext
+from . import appliances
 from .fallback import (
     AIR_POLLUTANTS,
     bind_air_quality,
     bind_button,
+    bind_doorbell,
     bind_fan,
+    bind_garage_door,
     bind_light,
     bind_thermostat,
     button_presses,
@@ -34,10 +37,12 @@ def fan_with_light(ctx: HapContext) -> None:
     bind_light(ctx, acc.service("Lightbulb", linked_to=fan_svc), light)
 
 
+def _mentions_filter(ent) -> bool:
+    return "filter" in (ent.translation_key or ent.entity_id)
+
+
 def _is_filter_life(ent) -> bool:
-    return "filter" in (ent.translation_key or ent.entity_id) and (
-        ent.unit_of_measurement in (None, "%")
-    )
+    return _mentions_filter(ent) and ent.unit_of_measurement in (None, "%")
 
 
 def _pollutants(ctx: HapContext) -> dict[str, str]:
@@ -55,8 +60,11 @@ def air_purifier(ctx: HapContext) -> None:
     if ctx.device is None or len(fans) != 1:
         return
     filter_life = ctx.entity("sensor", predicate=_is_filter_life)
+    # A "replace filter" binary sensor and a "reset filter" button, if it has them.
+    filter_change = ctx.entity("binary_sensor", predicate=_mentions_filter)
+    filter_reset = ctx.entity("button", predicate=_mentions_filter)
     pollutants = _pollutants(ctx)
-    if filter_life is None and not pollutants:
+    if filter_life is None and filter_change is None and not pollutants:
         return
 
     fan = fans[0]
@@ -86,27 +94,86 @@ def air_purifier(ctx: HapContext) -> None:
         set=set_target,
     )
 
-    if filter_life is not None:
+    if filter_life is not None or filter_change is not None:
         filt = acc.service("FilterMaintenance", linked_to=purifier)
-        filt.char("FilterLifeLevel", watch=[filter_life], get=lambda: ctx.number(filter_life))
-        filt.char(
-            "FilterChangeIndication",
-            watch=[filter_life],
-            get=lambda: int((ctx.number(filter_life) or 100) < 10),
-        )
+        if filter_life is not None:
+            filt.char("FilterLifeLevel", watch=[filter_life], get=lambda: ctx.number(filter_life))
+        if filter_change is not None:
+            filt.char("FilterChangeIndication", watch=[filter_change],
+                      get=lambda: int(ctx.is_on(filter_change)))
+        else:
+            filt.char(
+                "FilterChangeIndication",
+                watch=[filter_life],
+                get=lambda: int((ctx.number(filter_life) or 100) < 10),
+            )
+        if filter_reset is not None:
+            # Write-only in HomeKit: the Home app's "reset filter" presses the button.
+            filt.char("ResetFilterIndication", watch=[filter_reset],
+                      set=lambda _v: ctx.call("button", "press", filter_reset))
 
     if pollutants:
         bind_air_quality(ctx, acc.service("AirQualitySensor", linked_to=purifier), pollutants)
 
 def thermostat(ctx: HapContext) -> None:
-    """A climate entity, with the device's humidity sensor folded in if it has one."""
+    """A climate entity: AC-style units as HeaterCooler, others as Thermostat
+    with the device's humidity sensor folded in if it has one."""
     climates = ctx.entities("climate")
     if ctx.device is None or len(climates) != 1:
         return
+    climate = ctx.entry(climates[0])
+    if appliances.uses_heater_cooler(climate):
+        acc = ctx.accessory(category=appliances.heater_cooler_category(climate))
+        appliances.bind_heater_cooler(ctx, acc.service("HeaterCooler", primary=True), climate)
+        return  # HeaterCooler has no humidity; the sensor gets its own tile
     humidity = ctx.entity("sensor", device_class="humidity")
     acc = ctx.accessory(category="THERMOSTAT")
-    bind_thermostat(
-        ctx, acc.service("Thermostat", primary=True), ctx.entry(climates[0]), humidity
+    bind_thermostat(ctx, acc.service("Thermostat", primary=True), climate, humidity)
+
+
+def humidifier(ctx: HapContext) -> None:
+    """A humidifier with the device's humidity sensor folded in."""
+    humidifiers = ctx.entities("humidifier")
+    if ctx.device is None or len(humidifiers) != 1:
+        return
+    humidity = ctx.entity("sensor", device_class="humidity")
+    acc = ctx.accessory(category="HUMIDIFIER")
+    appliances.bind_humidifier(
+        ctx, acc.service("HumidifierDehumidifier", primary=True),
+        ctx.entry(humidifiers[0]), humidity,
+    )
+
+
+def doorbell(ctx: HapContext) -> None:
+    """A doorbell with the device's motion sensor linked to it."""
+    if ctx.device is None:
+        return
+    bell = ctx.entity("event", device_class="doorbell")
+    if bell is None:
+        return
+    motion = ctx.entity("binary_sensor", device_class="motion")
+    acc = ctx.accessory(category="VIDEO_DOOR_BELL")
+    svc = acc.service("Doorbell", primary=True)
+    bind_doorbell(ctx, svc, ctx.entry(bell))
+    if motion is not None:
+        acc.service("MotionSensor", linked_to=svc).char(
+            "MotionDetected", watch=[motion], get=lambda: ctx.is_on(motion)
+        )
+
+
+def garage_door(ctx: HapContext) -> None:
+    """A garage door with the device's obstruction sensor wired to ObstructionDetected."""
+    if ctx.device is None:
+        return
+    door = ctx.entity("cover", device_class="garage")
+    if door is None:
+        return
+    obstruction = ctx.entity("binary_sensor", device_class="safety") or ctx.entity(
+        "binary_sensor", device_class="problem"
+    )
+    acc = ctx.accessory(category="GARAGE_DOOR_OPENER")
+    bind_garage_door(
+        ctx, acc.service("GarageDoorOpener", primary=True), ctx.entry(door), obstruction
     )
 
 
@@ -205,7 +272,8 @@ Profile = Callable[[HapContext], None]
 
 # Purifier first: a purifier is also "a device with one fan".
 PROFILES: list[Profile] = [
-    air_purifier, fan_with_light, thermostat, air_quality_sensor, buttons
+    air_purifier, fan_with_light, thermostat, humidifier, doorbell, garage_door,
+    air_quality_sensor, buttons,
 ]
 
 FINISHERS: list[Profile] = [device_status]

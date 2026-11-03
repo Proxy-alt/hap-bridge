@@ -249,3 +249,57 @@ async def test_remote_presses_reach_homekit(hass, config_entry):
         hass.states.async_set(eids[1], "2026-11-03T08:00:00+00:00", {"event_type": "double_press"})
         await hass.async_block_till_done()
     assert notify.call_count == 1
+
+
+async def test_appliances_materialize(hass, config_entry, caplog):
+    MockConfigEntry(domain="acme").add_to_hass(hass)
+    reg = er.async_get(hass)
+    entities = {
+        "climate": ("ac", "cool", {"current_temperature": 25, "temperature": 22,
+                                   "fan_mode": "low", "swing_mode": "off"},
+                    {"supported_features": 1 | 8 | 32,
+                     "capabilities": {"hvac_modes": ["off", "heat", "cool"],
+                                      "fan_modes": ["low", "high"],
+                                      "swing_modes": ["off", "on"]}}),
+        "humidifier": ("hum", "on", {"humidity": 50, "current_humidity": 40}, {}),
+        "alarm_control_panel": ("alarm", "disarmed", {}, {"supported_features": 3}),
+        "valve": ("valve", "closed", {}, {"supported_features": 3}),
+        "water_heater": ("tank", "eco", {"temperature": 55, "current_temperature": 50},
+                         {"capabilities": {"min_temp": 40, "max_temp": 65}}),
+        "vacuum": ("robot", "docked", {}, {"supported_features": 8192 | 16}),
+        "lawn_mower": ("mower", "docked", {}, {}),
+        "scene": ("evening", "unknown", {}, {}),
+        "script": ("bedtime", "off", {}, {}),
+        "button": ("doorbell_chime", "unknown", {}, {}),
+        "select": ("mode", "Home", {}, {"capabilities": {"options": ["Home", "Away"]}}),
+    }
+    ids = {}
+    for domain, (uid, state, attrs, kw) in entities.items():
+        ent = reg.async_get_or_create(domain, "acme", uid, original_name=uid, **kw)
+        hass.states.async_set(ent.entity_id, state, attrs)
+        ids[domain] = ent.entity_id
+    calls = async_mock_service(hass, "climate", "set_hvac_mode")
+    fan_calls = async_mock_service(hass, "climate", "set_fan_mode")
+
+    bridge = await _setup(hass, config_entry)
+    assert "Skipping" not in caplog.text
+    assert "Error" not in caplog.text
+    for domain, entity_id in ids.items():
+        assert _accessory(bridge, entity_id) is not None, domain
+
+    acc = _hap_accessory(bridge, ids["climate"])
+    hc = acc.get_service("HeaterCooler")
+    assert hc.get_characteristic("TargetHeaterCoolerState").properties["ValidValues"] == {
+        "Heat": 1, "Cool": 2}
+    iid = acc.iid_manager.get_iid
+    bridge._driver.set_characteristics({"characteristics": [
+        {"aid": acc.aid, "iid": iid(hc.get_characteristic("TargetHeaterCoolerState")), "value": 1},
+        {"aid": acc.aid, "iid": iid(hc.get_characteristic("RotationSpeed")), "value": 100},
+    ]}, ("127.0.0.1", 50000))
+    await hass.async_block_till_done()
+    assert calls[0].data["hvac_mode"] == "heat"
+    assert fan_calls[0].data["fan_mode"] == "high"
+
+    (select,) = (a for spec, a in bridge._accessories if ids["select"] in spec.services[0].watched())
+    names = [s.get_characteristic("Name").value for s in select.services if s.display_name == "Switch"]
+    assert names == ["Home", "Away"]

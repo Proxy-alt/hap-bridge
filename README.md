@@ -16,10 +16,18 @@ For each device, in order, each step seeing only what earlier steps left:
 1. **The integration's own `hap_bridge.py`**, if it ships one.
 2. **Bundled profiles** in `profiles/generic.py`: matched on device shape
    (e.g. "one fan + a filter-life sensor = purifier") or per integration.
-   Today: air purifier, ceiling fan with light, thermostat (a climate
-   entity, plus the device's humidity sensor if it has one), air quality (all
-   of a device's pollutant sensors in one tile, rated by the worst), and
-   multi-button remotes (one accessory with a numbered switch per button).
+   Today:
+   - air purifier, with filter life, a "replace filter" sensor and a
+     "reset filter" button if the device has them
+   - ceiling fan with light
+   - climate: AC-style units as heater/coolers; others as thermostats, with
+     the device's humidity sensor folded in
+   - humidifier, with the device's humidity sensor
+   - doorbell, with the device's motion sensor linked
+   - garage door, with the device's safety/problem sensor as obstruction
+   - air quality: all of a device's pollutant sensors in one tile, rated by
+     the worst
+   - multi-button remotes: one accessory with a numbered switch per button
 3. **Fallback**: per-entity mapping similar to core HomeKit Bridge:
    - lights, with brightness, hue/saturation and color temperature, plus
      Adaptive Lighting for lights with color temperature (see below)
@@ -30,7 +38,17 @@ For each device, in order, each step seeing only what earlier steps left:
    - binary sensors, including CO and gas
    - locks
    - covers, with tilt; garage doors become garage door openers
-   - climate as thermostats
+   - climate: AC-style units (fan speeds or swing, no humidity target, as in
+     core HomeKit) as heater/coolers, everything else as thermostats
+   - humidifiers and dehumidifiers
+   - alarm panels as security systems, offering only the arm modes they
+     support. Panels that need a code can't be armed or disarmed from Home,
+     which has nowhere to enter one.
+   - valves, and water heaters as heat-only thermostats
+   - vacuums and lawn mowers as switches: on starts, off sends them home
+   - scenes and buttons as switches that turn themselves back off; scripts
+     as switches. Restart, update and identify buttons are left out.
+   - selects and input selects as one switch per option
    - doorbell and button `event` entities
 4. **Finishers** that add to what's been built: a battery level sensor adds a
    linked Battery service, and low-battery, tamper and problem sensors set

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..api import HapContext, ServiceSpec
+from . import appliances
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_registry import RegistryEntry
@@ -282,7 +283,10 @@ def bind_thermostat(
 _DOOR_STATES = {"open": 0, "closed": 1, "opening": 2, "closing": 3}
 
 
-def bind_garage_door(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+def bind_garage_door(
+    ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry, obstruction: str | None = None
+) -> None:
+    """Garage door cover; `obstruction` is an optional binary sensor entity."""
     eid = ent.entity_id
 
     def state() -> str:
@@ -296,7 +300,10 @@ def bind_garage_door(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> N
         get=lambda: int(state() in ("closed", "closing")),
         set=lambda v: ctx.call("cover", "close_cover" if v else "open_cover", eid),
     )
-    svc.char("ObstructionDetected", watch=[eid], get=lambda: False)
+    if obstruction is not None:
+        svc.char("ObstructionDetected", watch=[obstruction], get=lambda: ctx.is_on(obstruction))
+    else:
+        svc.char("ObstructionDetected", watch=[eid], get=lambda: False)
 
 
 def _new_events(ctx: HapContext, eid: str) -> Callable[[], bool]:
@@ -566,7 +573,37 @@ def _cover(ctx: HapContext, ent: RegistryEntry) -> None:
 
 
 def _climate(ctx: HapContext, ent: RegistryEntry) -> None:
-    bind_thermostat(ctx, _accessory(ctx, ent, "THERMOSTAT").service("Thermostat", primary=True), ent)
+    if appliances.uses_heater_cooler(ent):
+        acc = _accessory(ctx, ent, appliances.heater_cooler_category(ent))
+        appliances.bind_heater_cooler(ctx, acc.service("HeaterCooler", primary=True), ent)
+    else:
+        acc = _accessory(ctx, ent, "THERMOSTAT")
+        bind_thermostat(ctx, acc.service("Thermostat", primary=True), ent)
+
+
+def _simple(category: str, service: str, binder: Callable[..., None]):
+    """A builder for one entity -> one accessory with one service."""
+
+    def build(ctx: HapContext, ent: RegistryEntry) -> None:
+        binder(ctx, _accessory(ctx, ent, category).service(service, primary=True), ent)
+
+    return build
+
+
+def _valve(ctx: HapContext, ent: RegistryEntry) -> None:
+    if ent.supported_features & (appliances.VALVE_OPEN | appliances.VALVE_CLOSE):
+        appliances.bind_valve(ctx, _accessory(ctx, ent, "FAUCET").service("Valve", primary=True), ent)
+
+
+def _button(ctx: HapContext, ent: RegistryEntry) -> None:
+    # Restart/update/identify buttons are maintenance, not something to tap in Home.
+    if _device_class(ent) not in ("restart", "update", "identify"):
+        _simple("SWITCH", "Switch", appliances.bind_momentary)(ctx, ent)
+
+
+def _select(ctx: HapContext, ent: RegistryEntry) -> None:
+    if options := appliances.select_options(ctx, ent):
+        appliances.bind_select(ctx, _accessory(ctx, ent, "SWITCH"), ent, options)
 
 
 def _event(ctx: HapContext, ent: RegistryEntry) -> None:
@@ -592,4 +629,18 @@ _BUILDERS: dict[str, Callable[[HapContext, RegistryEntry], None]] = {
     "cover": _cover,
     "climate": _climate,
     "event": _event,
+    "humidifier": _simple("HUMIDIFIER", "HumidifierDehumidifier", appliances.bind_humidifier),
+    "alarm_control_panel": _simple(
+        "ALARM_SYSTEM", "SecuritySystem", appliances.bind_security_system
+    ),
+    "valve": _valve,
+    "water_heater": _simple("THERMOSTAT", "Thermostat", appliances.bind_water_heater),
+    "vacuum": _simple("SWITCH", "Switch", appliances.bind_vacuum),
+    "lawn_mower": _simple("SWITCH", "Switch", appliances.bind_lawn_mower),
+    "scene": _simple("SWITCH", "Switch", appliances.bind_momentary),
+    "button": _button,
+    "input_button": _simple("SWITCH", "Switch", appliances.bind_momentary),
+    "script": _switch,
+    "select": _select,
+    "input_select": _select,
 }
