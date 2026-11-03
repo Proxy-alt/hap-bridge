@@ -202,12 +202,18 @@ class HapBridge:
             acc.add_service(service)
             built[id(svc_spec)] = service
 
+            if svc_spec.write is not None:
+                service.setter_callback = self._setter(
+                    f"{spec.name}: writing {svc_spec.type_name}", svc_spec.write
+                )
             for name, char_spec in svc_spec.chars.items():
                 char = service.configure_char(
                     name,
                     properties=char_spec.props or None,
                     valid_values=char_spec.valid_values,
-                    setter_callback=self._setter(spec, char_spec),
+                    setter_callback=char_spec.set and self._setter(
+                        f"{spec.name}: writing {name}", char_spec.set
+                    ),
                 )
                 self._push(char, char_spec)
                 for entity_id in char_spec.watch:
@@ -221,22 +227,19 @@ class HapBridge:
                 service.add_linked_service(built[id(linked)])
         return acc
 
-    def _setter(self, spec: AccessorySpec, char_spec: CharSpec):
-        if char_spec.set is None:
-            return None
-
+    def _setter(self, label: str, setter: Callable[[Any], Any]) -> Callable[[Any], None]:
         async def _write(value: Any) -> None:
             try:
-                result = char_spec.set(value)
+                result = setter(value)
                 if inspect.isawaitable(result):
                     await result
             except Exception:  # noqa: BLE001 - one bad write must not kill the bridge
-                _LOGGER.exception("%s: writing %s=%r failed", spec.name, char_spec.name, value)
+                _LOGGER.exception("%s=%r failed", label, value)
 
         def _on_write(value: Any) -> None:
             # HAP-python may call this off the event loop, and setters are free to
             # touch hass, so always run them on it (create_task is thread-safe).
-            self.hass.create_task(_write(value), f"{DOMAIN} write {char_spec.name}")
+            self.hass.create_task(_write(value), f"{DOMAIN} {label}")
 
         return _on_write
 

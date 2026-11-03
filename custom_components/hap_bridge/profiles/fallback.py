@@ -16,7 +16,11 @@ if TYPE_CHECKING:
 
 # Feature bits from the HA entity models.
 FAN_SET_SPEED = 1
+FAN_OSCILLATE = 2
+FAN_DIRECTION = 4
+FAN_PRESET_MODE = 8
 COVER_SET_POSITION = 4
+COVER_SET_TILT_POSITION = 128
 CLIMATE_TARGET_TEMPERATURE_RANGE = 2
 
 
@@ -40,38 +44,125 @@ def _device_class(ent: RegistryEntry) -> str | None:
 # -- binders ------------------------------------------------------------------
 
 
+# Color modes HA can drive from an hs_color (it converts for xy/rgb* lights).
+_HS_MODES = {"hs", "xy", "rgb", "rgbw", "rgbww"}
+
+
 def bind_light(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """On/off, brightness, hue/saturation and color temperature, as one write.
+
+    The Home app sends e.g. On + Brightness + Hue together; they become a
+    single light.turn_on instead of one call per characteristic.
+    """
     eid = ent.entity_id
-    svc.char(
-        "On",
-        watch=[eid],
-        get=lambda: ctx.is_on(eid),
-        set=lambda v: ctx.call("light", "turn_on" if v else "turn_off", eid),
-    )
-    modes = (ent.capabilities or {}).get("supported_color_modes") or []
-    if any(mode != "onoff" for mode in modes):
+    caps = ent.capabilities or {}
+    modes = set(caps.get("supported_color_modes") or [])
+
+    def write(values: dict[str, Any]):
+        if values.get("On") is False or values.get("Brightness") == 0:
+            return ctx.call("light", "turn_off", eid)
+        data: dict[str, Any] = {}
+        if (brightness := values.get("Brightness")) is not None:
+            data["brightness_pct"] = brightness
+        # When the Home app sends both, the temperature is the newer intent.
+        if (mireds := values.get("ColorTemperature")) is not None:
+            data["color_temp_kelvin"] = round(1_000_000 / mireds)
+        elif "Hue" in values or "Saturation" in values:
+            hue, sat = ctx.attr(eid, "hs_color") or (0, 0)
+            data["hs_color"] = (values.get("Hue", hue), values.get("Saturation", sat))
+        return ctx.call("light", "turn_on", eid, **data)
+
+    svc.on_write(write)
+    svc.char("On", watch=[eid], get=lambda: ctx.is_on(eid))
+    if modes - {"onoff"}:
+        # Off lights have no brightness/color; keep showing the last one.
         svc.char(
             "Brightness",
             watch=[eid],
-            get=lambda: round((ctx.attr(eid, "brightness") or 0) / 255 * 100),
-            set=lambda v: ctx.call("light", "turn_on", eid, brightness_pct=v),
+            get=lambda: _scale(ctx.attr(eid, "brightness"), 255, 100),
         )
+    if modes & _HS_MODES:
+        svc.char("Hue", watch=[eid], get=lambda: _index(ctx.attr(eid, "hs_color"), 0))
+        svc.char("Saturation", watch=[eid], get=lambda: _index(ctx.attr(eid, "hs_color"), 1))
+    if "color_temp" in modes:
+        props: dict[str, Any] = {}
+        # Warmest kelvin = most mireds.
+        if max_k := caps.get("max_color_temp_kelvin"):
+            props["minValue"] = 1_000_000 // max_k
+        if min_k := caps.get("min_color_temp_kelvin"):
+            props["maxValue"] = -(-1_000_000 // min_k)
+
+        def mireds() -> int | None:
+            kelvin = ctx.attr(eid, "color_temp_kelvin")
+            return round(1_000_000 / kelvin) if kelvin else None
+
+        svc.char("ColorTemperature", watch=[eid], get=mireds, props=props)
+
+
+def _scale(value: float | None, source_max: float, target_max: float) -> int | None:
+    return None if value is None else round(value / source_max * target_max)
+
+
+def _index(values: Any, i: int) -> Any:
+    return values[i] if values else None
+
+
+def _auto_preset(ctx: HapContext, eid: str) -> str | None:
+    modes = ctx.attr(eid, "preset_modes") or []
+    return next((m for m in modes if m.lower() == "auto"), None)
 
 
 def bind_fan(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """Fan controls; on Fanv2 also direction and an auto preset."""
     eid = ent.entity_id
+    features = ent.supported_features
     svc.char(
         "Active",
         watch=[eid],
         get=lambda: int(ctx.is_on(eid)),
         set=lambda v: ctx.call("fan", "turn_on" if v else "turn_off", eid),
     )
-    if ent.supported_features & FAN_SET_SPEED:
+    if features & FAN_SET_SPEED:
         svc.char(
             "RotationSpeed",
             watch=[eid],
             get=lambda: ctx.attr(eid, "percentage") or 0,
             set=lambda v: ctx.call("fan", "set_percentage", eid, percentage=v),
+        )
+    if features & FAN_OSCILLATE:
+        svc.char(
+            "SwingMode",
+            watch=[eid],
+            get=lambda: int(bool(ctx.attr(eid, "oscillating"))),
+            set=lambda v: ctx.call("fan", "oscillate", eid, oscillating=bool(v)),
+        )
+    if svc.type_name != "Fanv2":
+        return  # e.g. AirPurifier: no direction, and its own auto/manual state
+    if features & FAN_DIRECTION:
+        # RotationDirection: 0 = clockwise (forward), 1 = counter-clockwise.
+        svc.char(
+            "RotationDirection",
+            watch=[eid],
+            get=lambda: int(ctx.attr(eid, "direction") == "reverse"),
+            set=lambda v: ctx.call(
+                "fan", "set_direction", eid, direction="reverse" if v else "forward"
+            ),
+        )
+    if features & FAN_PRESET_MODE and _auto_preset(ctx, eid):
+
+        def set_target(value: int):
+            # TargetFanState: 0 = manual, 1 = auto.
+            if value and (preset := _auto_preset(ctx, eid)):
+                return ctx.call("fan", "set_preset_mode", eid, preset_mode=preset)
+            return ctx.call(
+                "fan", "set_percentage", eid, percentage=ctx.attr(eid, "percentage") or 50
+            )
+
+        svc.char(
+            "TargetFanState",
+            watch=[eid],
+            get=lambda: int((ctx.attr(eid, "preset_mode") or "").lower() == "auto"),
+            set=set_target,
         )
 
 
@@ -207,14 +298,13 @@ def bind_garage_door(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> N
     svc.char("ObstructionDetected", watch=[eid], get=lambda: False)
 
 
-def bind_doorbell(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
-    """Doorbell `event` entity: each new event is one press.
+def _new_events(ctx: HapContext, eid: str) -> Callable[[], bool]:
+    """True once per new event of an `event` entity.
 
-    An event entity's state is the timestamp of its last event, so a press is
-    a new timestamp. Comparing against the last *real* timestamp keeps
-    startup and unavailable -> available from ringing.
+    An event entity's state is the timestamp of its last event, so a new
+    event is a new timestamp. Comparing against the last *real* timestamp
+    keeps startup and unavailable -> available from firing.
     """
-    eid = ent.entity_id
 
     def stamp() -> str | None:
         current = ctx.state(eid)
@@ -224,14 +314,92 @@ def bind_doorbell(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None
 
     last = [stamp()]
 
-    def pressed() -> int | None:
+    def fired() -> bool:
         now = stamp()
         if now is None or now == last[0]:
-            return None
+            return False
         last[0] = now
-        return 0  # ProgrammableSwitchEvent: single press
+        return True
 
-    svc.char("ProgrammableSwitchEvent", watch=[eid], get=pressed)
+    return fired
+
+
+def bind_doorbell(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """Doorbell `event` entity: each new event is one ring."""
+    fired = _new_events(ctx, ent.entity_id)
+    # ProgrammableSwitchEvent 0 = single press.
+    svc.char("ProgrammableSwitchEvent", watch=[ent.entity_id], get=lambda: 0 if fired() else None)
+
+
+# Button event_type -> ProgrammableSwitchEvent. Integrations name these
+# freely; these are the common spellings.
+_PRESS_EVENTS = {
+    "press": 0, "single_press": 0, "short_press": 0, "short_release": 0, "initial_press": 0,
+    "double_press": 1,
+    "long_press": 2, "long_release": 2, "hold": 2,
+}
+_PRESS_NAMES = {0: "SinglePress", 1: "DoublePress", 2: "LongPress"}
+
+
+def button_presses(ent: RegistryEntry) -> dict[str, int]:
+    """The event types of a button `event` entity that HomeKit can represent."""
+    types = (ent.capabilities or {}).get("event_types") or []
+    return {t: _PRESS_EVENTS[t] for t in types if t in _PRESS_EVENTS}
+
+
+def bind_button(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """Button `event` entity as a stateless programmable switch.
+
+    Only the press kinds it can send are offered, so the Home app doesn't
+    show a "double press" trigger for a button that never double-presses.
+    """
+    eid = ent.entity_id
+    presses = button_presses(ent)
+    fired = _new_events(ctx, eid)
+
+    def press() -> int | None:
+        if not fired():
+            return None
+        return presses.get(ctx.attr(eid, "event_type"))
+
+    svc.char(
+        "ProgrammableSwitchEvent",
+        watch=[eid],
+        get=press,
+        valid_values={_PRESS_NAMES[v]: v for v in sorted(set(presses.values()))},
+    )
+
+
+# Pollutant sensor device class -> (density characteristic, AirQuality bands).
+# Bands are upper limits for 1 (excellent) .. 4 (inferior); above is 5 (poor).
+# Same thresholds as core HomeKit (US AQI for PM, WHO IAQ for VOC).
+AIR_POLLUTANTS: dict[str, tuple[str, tuple[float, ...] | None]] = {
+    "pm25": ("PM2.5Density", (9, 35.4, 55.4, 125.4)),
+    "pm10": ("PM10Density", (54, 154, 254, 354)),
+    "nitrogen_dioxide": ("NitrogenDioxideDensity", (30, 60, 80, 90)),
+    "volatile_organic_compounds": ("VOCDensity", (250, 500, 1000, 3000)),
+    "ozone": ("OzoneDensity", None),
+    "sulphur_dioxide": ("SulphurDioxideDensity", None),
+}
+
+
+def bind_air_quality(ctx: HapContext, svc: ServiceSpec, sensors: dict[str, str]) -> None:
+    """AirQuality from the worst pollutant, plus each one's density.
+
+    `sensors` maps pollutant device class (keys of AIR_POLLUTANTS) to entity.
+    """
+
+    def air_quality() -> int:
+        levels = []
+        for device_class, eid in sensors.items():
+            bands = AIR_POLLUTANTS[device_class][1]
+            if bands is not None and (value := ctx.number(eid)) is not None:
+                levels.append(next((q for q, limit in enumerate(bands, 1) if value <= limit), 5))
+        return max(levels, default=0)  # 0 = unknown
+
+    svc.char("AirQuality", watch=list(sensors.values()), get=air_quality)
+    for device_class, eid in sensors.items():
+        svc.char(AIR_POLLUTANTS[device_class][0], watch=[eid], get=lambda eid=eid: ctx.number(eid))
 
 
 # -- per-domain accessories -----------------------------------------------------
@@ -254,6 +422,13 @@ def _fan(ctx: HapContext, ent: RegistryEntry) -> None:
     bind_fan(ctx, _accessory(ctx, ent, "FAN").service("Fanv2", primary=True), ent)
 
 
+# Level sensors that also get a "detected" flag above core HomeKit's thresholds.
+_GAS_SENSORS = {
+    "carbon_monoxide": ("CarbonMonoxideSensor", "CarbonMonoxide", 25),
+    "carbon_dioxide": ("CarbonDioxideSensor", "CarbonDioxide", 1000),
+}
+
+
 def _sensor(ctx: HapContext, ent: RegistryEntry) -> None:
     eid = ent.entity_id
     device_class = _device_class(ent)
@@ -270,6 +445,26 @@ def _sensor(ctx: HapContext, ent: RegistryEntry) -> None:
     elif device_class == "humidity":
         svc = _accessory(ctx, ent, "SENSOR").service("HumiditySensor", primary=True)
         svc.char("CurrentRelativeHumidity", watch=[eid], get=lambda: ctx.number(eid))
+    elif device_class == "illuminance":
+        svc = _accessory(ctx, ent, "SENSOR").service("LightSensor", primary=True)
+        # HAP's minimum is 0.0001 lx; 0 would be rejected.
+        svc.char(
+            "CurrentAmbientLightLevel",
+            watch=[eid],
+            get=lambda: None if (lux := ctx.number(eid)) is None else max(lux, 0.0001),
+        )
+    elif device_class in _GAS_SENSORS:
+        service, prefix, threshold = _GAS_SENSORS[device_class]
+        svc = _accessory(ctx, ent, "SENSOR").service(service, primary=True)
+        svc.char(f"{prefix}Level", watch=[eid], get=lambda: ctx.number(eid))
+        svc.char(
+            f"{prefix}Detected",
+            watch=[eid],
+            get=lambda: int((ctx.number(eid) or 0) > threshold),
+        )
+    elif device_class in AIR_POLLUTANTS:
+        svc = _accessory(ctx, ent, "SENSOR").service("AirQualitySensor", primary=True)
+        bind_air_quality(ctx, svc, {device_class: eid})
 
 
 _BINARY_SENSORS: dict[str, tuple[str, str, Callable[[bool], Any]]] = {
@@ -283,6 +478,9 @@ _BINARY_SENSORS: dict[str, tuple[str, str, Callable[[bool], Any]]] = {
     "garage_door": ("ContactSensor", "ContactSensorState", int),
     "moisture": ("LeakSensor", "LeakDetected", int),
     "smoke": ("SmokeSensor", "SmokeDetected", int),
+    "carbon_monoxide": ("CarbonMonoxideSensor", "CarbonMonoxideDetected", int),
+    # Core HomeKit does the same: HAP has no generic gas sensor.
+    "gas": ("CarbonMonoxideSensor", "CarbonMonoxideDetected", int),
 }
 
 
@@ -349,6 +547,21 @@ def _cover(ctx: HapContext, ent: RegistryEntry) -> None:
         watch=[eid],
         get=lambda: {"closing": 0, "opening": 1}.get(getattr(ctx.state(eid), "state", ""), 2),
     )
+    if ent.supported_features & COVER_SET_TILT_POSITION:
+        # HA tilt is 0..100; HAP's is an angle, -90..90.
+        def angle() -> int | None:
+            tilt = ctx.attr(eid, "current_tilt_position")
+            return None if tilt is None else round(tilt / 100 * 180 - 90)
+
+        svc.char("CurrentHorizontalTiltAngle", watch=[eid], get=angle)
+        svc.char(
+            "TargetHorizontalTiltAngle",
+            watch=[eid],
+            get=angle,
+            set=lambda v: ctx.call(
+                "cover", "set_cover_tilt_position", eid, tilt_position=round((v + 90) / 180 * 100)
+            ),
+        )
 
 
 def _climate(ctx: HapContext, ent: RegistryEntry) -> None:
@@ -356,9 +569,15 @@ def _climate(ctx: HapContext, ent: RegistryEntry) -> None:
 
 
 def _event(ctx: HapContext, ent: RegistryEntry) -> None:
-    if _device_class(ent) == "doorbell":
+    device_class = _device_class(ent)
+    if device_class == "doorbell":
         svc = _accessory(ctx, ent, "VIDEO_DOOR_BELL").service("Doorbell", primary=True)
         bind_doorbell(ctx, svc, ent)
+    elif device_class == "button" and button_presses(ent):
+        svc = _accessory(ctx, ent, "PROGRAMMABLE_SWITCH").service(
+            "StatelessProgrammableSwitch", primary=True
+        )
+        bind_button(ctx, svc, ent)
 
 
 _BUILDERS: dict[str, Callable[[HapContext, RegistryEntry], None]] = {

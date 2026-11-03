@@ -11,7 +11,15 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..api import HapContext
-from .fallback import bind_fan, bind_light, bind_thermostat
+from .fallback import (
+    AIR_POLLUTANTS,
+    bind_air_quality,
+    bind_button,
+    bind_fan,
+    bind_light,
+    bind_thermostat,
+    button_presses,
+)
 
 
 def fan_with_light(ctx: HapContext) -> None:
@@ -32,8 +40,13 @@ def _is_filter_life(ent) -> bool:
     )
 
 
-# AirQuality: 1 excellent .. 5 poor, from PM2.5 in µg/m³ (US EPA breakpoints).
-_PM25_BANDS = ((12, 1), (35, 2), (55, 3), (150, 4))
+def _pollutants(ctx: HapContext) -> dict[str, str]:
+    """The device's unclaimed pollutant sensors, by device class."""
+    found = {}
+    for device_class in AIR_POLLUTANTS:
+        if (eid := ctx.entity("sensor", device_class=device_class)) is not None:
+            found[device_class] = eid
+    return found
 
 
 def air_purifier(ctx: HapContext) -> None:
@@ -42,8 +55,8 @@ def air_purifier(ctx: HapContext) -> None:
     if ctx.device is None or len(fans) != 1:
         return
     filter_life = ctx.entity("sensor", predicate=_is_filter_life)
-    pm25 = ctx.entity("sensor", device_class="pm25")
-    if filter_life is None and pm25 is None:
+    pollutants = _pollutants(ctx)
+    if filter_life is None and not pollutants:
         return
 
     fan = fans[0]
@@ -82,18 +95,8 @@ def air_purifier(ctx: HapContext) -> None:
             get=lambda: int((ctx.number(filter_life) or 100) < 10),
         )
 
-    if pm25 is not None:
-
-        def air_quality() -> int:
-            value = ctx.number(pm25)
-            if value is None:
-                return 0  # unknown
-            return next((q for limit, q in _PM25_BANDS if value <= limit), 5)
-
-        aq = acc.service("AirQualitySensor", linked_to=purifier)
-        aq.char("AirQuality", watch=[pm25], get=air_quality)
-        aq.char("PM2.5Density", watch=[pm25], get=lambda: ctx.number(pm25))
-
+    if pollutants:
+        bind_air_quality(ctx, acc.service("AirQualitySensor", linked_to=purifier), pollutants)
 
 def thermostat(ctx: HapContext) -> None:
     """A climate entity, with the device's humidity sensor folded in if it has one."""
@@ -107,12 +110,53 @@ def thermostat(ctx: HapContext) -> None:
     )
 
 
+def air_quality_sensor(ctx: HapContext) -> None:
+    """All of a device's pollutant sensors as one air quality tile."""
+    if ctx.device is None or not (pollutants := _pollutants(ctx)):
+        return
+    acc = ctx.accessory(category="SENSOR")
+    bind_air_quality(ctx, acc.service("AirQualitySensor", primary=True), pollutants)
+
+
+def buttons(ctx: HapContext) -> None:
+    """A multi-button remote as one accessory with a numbered switch per button."""
+    if ctx.device is None:
+        return
+    eids = ctx.entities(
+        "event", device_class="button", predicate=lambda e: bool(button_presses(e))
+    )
+    if len(eids) < 2:
+        return  # a single button is left to the fallback
+    acc = ctx.accessory(category="PROGRAMMABLE_SWITCH")
+    # Several switches on one accessory need a ServiceLabel saying how they're numbered.
+    acc.service("ServiceLabel").char(
+        "ServiceLabelNamespace", watch=[eids[0]], get=lambda: 1  # 1 = arabic numerals
+    )
+    for index, eid in enumerate(eids, 1):
+        svc = acc.service("StatelessProgrammableSwitch", primary=index == 1)
+        bind_button(ctx, svc, ctx.entry(eid))
+        svc.char("ServiceLabelIndex", watch=[eid], get=lambda index=index: index)
+
+
 # StatusLowBattery below this level when there's no low-battery binary sensor.
 LOW_BATTERY_PERCENT = 20
 
 
-def battery(ctx: HapContext) -> None:
-    """Link a Battery service to the device's tile if it has a battery level sensor."""
+# Sensor services that carry StatusLowBattery / StatusTampered / StatusFault.
+_STATUS_SERVICES = {
+    "AirQualitySensor", "CarbonDioxideSensor", "CarbonMonoxideSensor", "ContactSensor",
+    "HumiditySensor", "LeakSensor", "LightSensor", "MotionSensor", "OccupancySensor",
+    "SmokeSensor", "TemperatureSensor",
+}
+
+
+def device_status(ctx: HapContext) -> None:
+    """Battery and health from the device's diagnostic entities.
+
+    A battery level sensor adds a linked Battery service to the device's
+    first tile. Low battery, tamper and problem sensors also set the status
+    flags on every sensor tile of the device, which the Home app badges.
+    """
     if ctx.device is None or not ctx.accessories:
         return
     level = ctx.entity(
@@ -120,35 +164,50 @@ def battery(ctx: HapContext) -> None:
         device_class="battery",
         predicate=lambda e: e.unit_of_measurement in (None, "%"),
     )
-    if level is None:
-        return
     low = ctx.entity("binary_sensor", device_class="battery")
     charging = ctx.entity("binary_sensor", device_class="battery_charging")
+    tamper = ctx.entity("binary_sensor", device_class="tamper")
+    problem = ctx.entity("binary_sensor", device_class="problem")
 
+    def is_low() -> int:
+        if low is not None:
+            return int(ctx.is_on(low))
+        return int((ctx.number(level) or 100) < LOW_BATTERY_PERCENT)
+
+    battery_watch = [e for e in (low, level) if e is not None]
+    flags = []
+    if battery_watch:
+        flags.append(("StatusLowBattery", battery_watch, is_low))
+    if tamper is not None:
+        flags.append(("StatusTampered", [tamper], lambda: int(ctx.is_on(tamper))))
+    if problem is not None:
+        flags.append(("StatusFault", [problem], lambda: int(ctx.is_on(problem))))
+    for acc in ctx.accessories:
+        for svc in acc.services:
+            if svc.type_name in _STATUS_SERVICES:
+                for name, watch, get in flags:
+                    svc.char(name, watch=watch, get=get, affects_available=False)
+
+    if level is None:
+        return
     acc = ctx.accessories[0]
     primary = next((s for s in acc.services if s.primary), None)
     svc = acc.service("BatteryService", linked_to=primary)
     svc.char("BatteryLevel", watch=[level], get=lambda: ctx.number(level))
-    if low is not None:
-        svc.char("StatusLowBattery", watch=[low], get=lambda: int(ctx.is_on(low)))
-    else:
-        svc.char(
-            "StatusLowBattery",
-            watch=[level],
-            get=lambda: int((ctx.number(level) or 100) < LOW_BATTERY_PERCENT),
-        )
+    svc.char("StatusLowBattery", watch=battery_watch, get=is_low)
     # ChargingState: 0 = not charging, 1 = charging, 2 = not chargeable.
     if charging is not None:
         svc.char("ChargingState", watch=[charging], get=lambda: int(ctx.is_on(charging)))
     else:
         svc.char("ChargingState", watch=[level], get=lambda: 2)
 
-
 Profile = Callable[[HapContext], None]
 
 # Purifier first: a purifier is also "a device with one fan".
-PROFILES: list[Profile] = [air_purifier, fan_with_light, thermostat]
+PROFILES: list[Profile] = [
+    air_purifier, fan_with_light, thermostat, air_quality_sensor, buttons
+]
 
-FINISHERS: list[Profile] = [battery]
+FINISHERS: list[Profile] = [device_status]
 
 BY_INTEGRATION: dict[str, list[Profile]] = {}

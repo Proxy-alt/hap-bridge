@@ -16,14 +16,24 @@ For each device, in order, each step seeing only what earlier steps left:
 1. **The integration's own `hap_bridge.py`**, if it ships one.
 2. **Bundled profiles** in `profiles/generic.py`: matched on device shape
    (e.g. "one fan + a filter-life sensor = purifier") or per integration.
-   Today: air purifier, ceiling fan with light, and thermostat (a climate
-   entity, plus the device's humidity sensor if it has one).
-3. **Fallback**: per-entity mapping similar to core HomeKit Bridge: lights,
-   switches/outlets, fans, temperature/humidity sensors, binary sensors,
-   locks, covers (garage doors as garage door openers), climate as
-   thermostats, and doorbell `event` entities as doorbells.
-4. **Finishers** that add to what's been built: a device with a battery level
-   sensor gets a linked Battery service on its tile.
+   Today: air purifier, ceiling fan with light, thermostat (a climate
+   entity, plus the device's humidity sensor if it has one), air quality (all
+   of a device's pollutant sensors in one tile, rated by the worst), and
+   multi-button remotes (one accessory with a numbered switch per button).
+3. **Fallback**: per-entity mapping similar to core HomeKit Bridge:
+   - lights, with brightness, hue/saturation and color temperature
+   - switches and outlets
+   - fans, with oscillation, direction and an auto preset
+   - temperature, humidity, light level, CO and CO2 sensors
+   - single pollutant sensors as air quality
+   - binary sensors, including CO and gas
+   - locks
+   - covers, with tilt; garage doors become garage door openers
+   - climate as thermostats
+   - doorbell and button `event` entities
+4. **Finishers** that add to what's been built: a battery level sensor adds a
+   linked Battery service, and low-battery, tamper and problem sensors set
+   the status flags on the device's sensor tiles.
 
 Profiles are checked against HAP-python's service/characteristic catalogue at
 startup; an invalid accessory is skipped with a log line naming the problem.
@@ -69,6 +79,11 @@ async def async_describe_device(ctx: HapContext) -> None:
 - `get`/`set` don't have to involve HA entities at all. They can talk to the
   device directly.
 - Watching an entity claims it, so the fallback won't expose it again.
+- `svc.on_write(fn)` handles a whole controller write to a service at once:
+  `fn` gets `{characteristic: value}` for everything the Home app changed
+  together, e.g. On + Brightness + Hue, so it can make one service call.
+- `affects_available=False` on a characteristic keeps its entities out of
+  the "No Response" check (for side details like battery or tamper flags).
 - `ctx.accessory(key=...)` decides the AID. The default (the device ID) is
   stable; only override it with something equally stable.
 
@@ -121,7 +136,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 
 - **Not yet paired with a real Home app.** The HA tests stub out the HAP server.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
-- **Writes aren't batched.** Home sends `On` + `Brightness` together, and that makes two service calls.
+- **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
 - **No standalone (non-bridged) accessory mode** for cameras and TVs.
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
 - **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.

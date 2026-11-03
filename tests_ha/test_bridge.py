@@ -47,9 +47,9 @@ async def test_light_is_exposed_and_writable(hass, config_entry, lamp):
     assert bulb["characteristics"]["On"]["value"] is True
     assert bulb["characteristics"]["Brightness"]["value"] == 100
 
-    on = _hap_accessory(bridge, lamp).get_service("Lightbulb").get_characteristic("On")
-    # Simulate a controller write from HAP-python's thread-agnostic callback.
-    on.setter_callback(False)
+    bulb = _hap_accessory(bridge, lamp).get_service("Lightbulb")
+    # Lights take whole-service writes; simulate one from HAP-python.
+    bulb.setter_callback({"On": False})
     await hass.async_block_till_done()
     assert calls and calls[0].data["entity_id"] == lamp
 
@@ -193,3 +193,59 @@ async def test_new_profiles_materialize(hass, config_entry, caplog):
         .get_characteristic("TargetHeatingCoolingState")
     )
     assert target.properties["ValidValues"] == {"Off": 0, "Heat": 1}
+
+
+async def test_color_light_write_is_batched_through_hap(hass, config_entry):
+    source = MockConfigEntry(domain="acme")
+    source.add_to_hass(hass)
+    ent = er.async_get(hass).async_get_or_create(
+        "light", "acme", "strip", original_name="Strip",
+        capabilities={"supported_color_modes": ["hs", "color_temp"],
+                      "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6500},
+    )
+    hass.states.async_set(ent.entity_id, "on", {"brightness": 255, "hs_color": (30, 80),
+                                                 "color_temp_kelvin": 4000})
+    on_calls = async_mock_service(hass, "light", "turn_on")
+    bridge = await _setup(hass, config_entry)
+
+    acc = _hap_accessory(bridge, ent.entity_id)
+    bulb = acc.get_service("Lightbulb")
+    assert bulb.get_characteristic("ColorTemperature").properties["minValue"] == 153
+    iid = acc.iid_manager.get_iid
+    query = {"characteristics": [
+        {"aid": acc.aid, "iid": iid(bulb.get_characteristic(name)), "value": value}
+        for name, value in (("On", True), ("Brightness", 60), ("Hue", 120), ("Saturation", 50))
+    ]}
+    bridge._driver.set_characteristics(query, ("127.0.0.1", 50000))
+    await hass.async_block_till_done()
+
+    assert len(on_calls) == 1
+    assert on_calls[0].data == {"entity_id": ent.entity_id, "brightness_pct": 60,
+                                "hs_color": (120, 50)}
+
+
+async def test_remote_presses_reach_homekit(hass, config_entry):
+    source = MockConfigEntry(domain="acme")
+    source.add_to_hass(hass)
+    dev = dr.async_get(hass).async_get_or_create(
+        config_entry_id=source.entry_id, identifiers={("acme", "remote")}, name="Remote"
+    )
+    eids = []
+    for i in (1, 2):
+        ent = er.async_get(hass).async_get_or_create(
+            "event", "acme", f"btn{i}", device_id=dev.id, original_device_class="button",
+            capabilities={"event_types": ["single_press", "double_press"]},
+        )
+        hass.states.async_set(ent.entity_id, "2026-11-01T10:00:00+00:00", {"event_type": "single_press"})
+        eids.append(ent.entity_id)
+    bridge = await _setup(hass, config_entry)
+
+    (acc,) = (a for spec, a in bridge._accessories if spec.key.startswith("device:"))
+    switches = [s for s in acc.services if s.display_name == "StatelessProgrammableSwitch"]
+    assert len(switches) == 2 and acc.get_service("ServiceLabel") is not None
+
+    char = switches[1].get_characteristic("ProgrammableSwitchEvent")
+    with patch.object(type(char), "notify") as notify:
+        hass.states.async_set(eids[1], "2026-11-03T08:00:00+00:00", {"event_type": "double_press"})
+        await hass.async_block_till_done()
+    assert notify.call_count == 1

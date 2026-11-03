@@ -10,6 +10,12 @@ from typing import Any
 
 from .api import AccessorySpec
 
+# Characteristics HomeKit accepts on a service although HAP-python's bundled
+# catalogue (which predates them) doesn't list them there.
+EXTRA_CHARACTERISTICS: dict[str, set[str]] = {
+    "Lightbulb": {"ColorTemperature"},
+}
+
 
 def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str]]:
     """Return (errors, warnings). Accessories with errors are not exposed."""
@@ -41,7 +47,11 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
             errors.append(f"unknown service {svc.type_name!r}")
             continue
         required = info.get("RequiredCharacteristics", [])
-        allowed = set(required) | set(info.get("OptionalCharacteristics", []))
+        allowed = (
+            set(required)
+            | set(info.get("OptionalCharacteristics", []))
+            | EXTRA_CHARACTERISTICS.get(svc.type_name, set())
+        )
 
         for name, char in svc.chars.items():
             if name not in allowed:

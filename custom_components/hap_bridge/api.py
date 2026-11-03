@@ -46,6 +46,7 @@ class CharSpec:
     watch: tuple[str, ...] = ()
     props: dict[str, Any] = field(default_factory=dict)
     valid_values: dict[str, Any] | None = None
+    affects_available: bool = True
 
 
 class ServiceSpec:
@@ -58,6 +59,7 @@ class ServiceSpec:
         self.primary = primary
         self.chars: dict[str, CharSpec] = {}
         self.linked: list[ServiceSpec] = []
+        self.write: Callable[[dict[str, Any]], Awaitable[Any] | None] | None = None
 
     @property
     def unique_id(self) -> str | None:
@@ -68,8 +70,13 @@ class ServiceSpec:
         """
         return self._owner.unique_ids()[id(self)]
 
-    def watched(self) -> list[str]:
-        return [eid for char in self.chars.values() for eid in char.watch]
+    def watched(self, *, for_availability: bool = False) -> list[str]:
+        return [
+            eid
+            for char in self.chars.values()
+            if char.affects_available or not for_availability
+            for eid in char.watch
+        ]
 
     def char(
         self,
@@ -80,21 +87,37 @@ class ServiceSpec:
         watch: Iterable[str] = (),
         props: dict[str, Any] | None = None,
         valid_values: dict[str, Any] | None = None,
+        affects_available: bool = True,
     ) -> ServiceSpec:
         """Bind a characteristic. Returns the service so calls can chain.
 
         `get` is re-evaluated whenever an entity in `watch` changes state and the
         result is pushed to HomeKit; returning None skips the update. `set` is
         called with the raw HAP value when a controller writes; it may return a
-        coroutine (e.g. from `ctx.call`).
+        coroutine (e.g. from `ctx.call`). With `affects_available=False` the
+        watched entities don't count towards the accessory's "No Response"
+        (for side details such as battery or tamper flags).
         """
         watch = tuple(watch)
         self._owner.claim(*watch)
-        self.chars[name] = CharSpec(name, get, set, watch, props or {}, valid_values)
+        self.chars[name] = CharSpec(
+            name, get, set, watch, props or {}, valid_values, affects_available
+        )
         return self
 
     def link(self, other: ServiceSpec) -> ServiceSpec:
         self.linked.append(other)
+        return self
+
+    def on_write(self, write: Callable[[dict[str, Any]], Awaitable[Any] | None]) -> ServiceSpec:
+        """Handle all of one controller write to this service in a single call.
+
+        `write` gets `{characteristic name: HAP value}` for everything the Home
+        app changed at once (e.g. On + Brightness + Hue), so it can make one
+        service call. Characteristics bound without their own `set` become
+        writable through it. It may return a coroutine.
+        """
+        self.write = write
         return self
 
 
@@ -121,9 +144,9 @@ class AccessorySpec:
         if self.available is not None:
             return self.available()
         primary = next((s for s in self.services if s.primary), None)
-        if primary is not None and (watched := primary.watched()):
+        if primary is not None and (watched := primary.watched(for_availability=True)):
             return all(self._ctx.available(eid) for eid in watched)
-        watched = [eid for s in self.services for eid in s.watched()]
+        watched = [eid for s in self.services for eid in s.watched(for_availability=True)]
         return not watched or any(self._ctx.available(eid) for eid in watched)
 
     def service(
