@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable
+from collections.abc import Callable
 from functools import partial
 import inspect
 import logging
@@ -14,6 +14,7 @@ from pyhap import const as hap_const
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
 from pyhap.characteristic import Characteristic
+from pyhap.service import Service
 
 from homeassistant.components import persistent_notification, zeroconf
 from homeassistant.config_entries import ConfigEntry
@@ -50,7 +51,8 @@ class HapBridge:
         zc = await zeroconf.async_get_async_instance(self.hass)
         self._driver = await self.hass.async_add_executor_job(
             partial(
-                AccessoryDriver,
+                _Driver,
+                on_paired=self._on_paired,
                 port=self.entry.data[CONF_PORT],
                 persist_file=self.hass.config.path(
                     STORAGE_DIR, f"{DOMAIN}.{self.entry.entry_id}.state"
@@ -67,7 +69,15 @@ class HapBridge:
 
         specs = await async_collect_specs(self.hass, self.entry)
         added = 0
+        seen_keys: set[str] = set()
         for spec in specs:
+            # The key decides the AID; a second accessory with the same key would
+            # make Bridge.add_accessory raise and take the whole bridge down.
+            if spec.key in seen_keys:
+                _LOGGER.error(
+                    "Skipping %s: accessory key %r is already used", spec.name, spec.key
+                )
+                continue
             errors, warnings = validate_spec(spec, self._driver.loader)
             for warning in warnings:
                 _LOGGER.warning("%s (%s): %s", spec.name, spec.key, warning)
@@ -82,6 +92,7 @@ class HapBridge:
                 )
                 continue
             bridge.add_accessory(self._materialize(spec))
+            seen_keys.add(spec.key)
             added += 1
 
         self._driver.add_accessory(bridge)
@@ -96,15 +107,27 @@ class HapBridge:
         await self._driver.async_start()
         _LOGGER.info("HAP bridge %s started with %s accessories", bridge.display_name, added)
 
-        if not self._driver.state.paired:
+        if self._driver.state.paired:
+            persistent_notification.async_dismiss(self.hass, self._pairing_notification_id)
+        else:
             pincode = self._driver.state.pincode.decode()
             persistent_notification.async_create(
                 self.hass,
                 f"Add **{bridge.display_name}** in the Home app with code "
                 f"`{pincode}`.\n\nSetup URI: `{bridge.xhm_uri()}`",
                 title="HAP Bridge pairing",
-                notification_id=f"{DOMAIN}_{self.entry.entry_id}_pairing",
+                notification_id=self._pairing_notification_id,
             )
+
+    @property
+    def _pairing_notification_id(self) -> str:
+        return f"{DOMAIN}_{self.entry.entry_id}_pairing"
+
+    def _on_paired(self) -> None:
+        # Called from HAP-python's pairing handler, possibly off the event loop.
+        self.hass.loop.call_soon_threadsafe(
+            persistent_notification.async_dismiss, self.hass, self._pairing_notification_id
+        )
 
     async def async_stop(self) -> None:
         if self._unsub_state:
@@ -161,17 +184,18 @@ class HapBridge:
         if char_spec.set is None:
             return None
 
-        async def _await(result: Awaitable[Any], value: Any) -> None:
+        async def _write(value: Any) -> None:
             try:
-                await result
+                result = char_spec.set(value)
+                if inspect.isawaitable(result):
+                    await result
             except Exception:  # noqa: BLE001 - one bad write must not kill the bridge
                 _LOGGER.exception("%s: writing %s=%r failed", spec.name, char_spec.name, value)
 
         def _on_write(value: Any) -> None:
-            # HAP-python may call this off the event loop.
-            result = char_spec.set(value)
-            if inspect.isawaitable(result):
-                asyncio.run_coroutine_threadsafe(_await(result, value), self.hass.loop)
+            # HAP-python may call this off the event loop, and setters are free to
+            # touch hass, so always run them on it.
+            asyncio.run_coroutine_threadsafe(_write(value), self.hass.loop)
 
         return _on_write
 
@@ -190,6 +214,22 @@ class HapBridge:
                 char.set_value(value)
         except Exception:  # noqa: BLE001 - a broken getter only affects its own value
             _LOGGER.exception("Reading %s failed", char_spec.name)
+
+
+class _Driver(AccessoryDriver):
+    """AccessoryDriver that reports successful pairings."""
+
+    def __init__(self, *args: Any, on_paired: Callable[[], None], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_paired = on_paired
+
+    def pair(
+        self, client_username_bytes: bytes, client_public: bytes, client_permissions: bytes
+    ) -> bool:
+        success = super().pair(client_username_bytes, client_public, client_permissions)
+        if success:
+            self._on_paired()
+        return success
 
 
 def _category(category: str | int) -> int:

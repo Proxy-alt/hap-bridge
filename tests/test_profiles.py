@@ -110,3 +110,43 @@ def test_validator_rejects_bad_specs(hass, loader):
     assert any("NotAThing" in e for e in errors)
     assert any("NoSuchService" in e for e in errors)
     assert any("read-only" in e for e in errors)
+
+
+def test_device_less_contexts_get_distinct_keys(hass):
+    keys = []
+    for eid in ("switch.a", "switch.b"):
+        ctx = HapContext(hass, None, [make_entry(eid)])
+        keys.append(ctx.accessory().key)
+    assert keys[0] != keys[1]
+
+
+def _two_switches(hass, entity_ids):
+    ctx = HapContext(hass, make_device(), [make_entry(e) for e in entity_ids])
+    acc = ctx.accessory()
+    for eid in entity_ids:
+        acc.service("Switch").char("On", watch=[eid], get=lambda: True)
+    return acc
+
+
+def test_service_ids_survive_a_sibling_disappearing(hass):
+    both = _two_switches(hass, ["switch.a", "switch.b"])
+    only_b = _two_switches(hass, ["switch.b"])
+    assert both.services[1].unique_id == only_b.services[0].unique_id == "reg-switch.b"
+    assert both.services[0].unique_id != both.services[1].unique_id
+
+
+def test_services_watching_the_same_entity_stay_distinct(hass):
+    ctx = HapContext(hass, make_device(), [make_entry("switch.a")])
+    acc = ctx.accessory()
+    first = acc.service("Switch").char("On", watch=["switch.a"])
+    second = acc.service("Switch").char("On", watch=["switch.a"])
+    assert first.unique_id != second.unique_id
+
+
+def test_validator_rejects_duplicate_explicit_unique_ids(hass, loader):
+    ctx = HapContext(hass, make_device(), [])
+    acc = ctx.accessory()
+    acc.service("Switch", unique_id="x").char("On", get=lambda: True)
+    acc.service("Switch", unique_id="x").char("On", get=lambda: True)
+    errors, _ = validate_spec(acc, loader)
+    assert any("unique_id 'x'" in e for e in errors)

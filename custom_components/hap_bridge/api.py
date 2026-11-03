@@ -54,10 +54,22 @@ class ServiceSpec:
     ) -> None:
         self._owner = owner
         self.type_name = type_name
-        self.unique_id = unique_id
+        self.explicit_unique_id = unique_id
         self.primary = primary
         self.chars: dict[str, CharSpec] = {}
         self.linked: list[ServiceSpec] = []
+
+    @property
+    def unique_id(self) -> str | None:
+        """What tells this service apart from others of its type; part of its IIDs.
+
+        Resolved lazily because characteristics (and what they watch) are added
+        after the service is created.
+        """
+        return self._owner.unique_ids()[id(self)]
+
+    def watched(self) -> list[str]:
+        return [eid for char in self.chars.values() for eid in char.watch]
 
     def char(
         self,
@@ -105,10 +117,12 @@ class AccessorySpec:
         primary: bool = False,
         linked_to: ServiceSpec | None = None,
     ) -> ServiceSpec:
-        """Add a HAP service. Repeat services of one type get distinct IDs."""
-        if unique_id is None:
-            same_type = sum(1 for s in self.services if s.type_name == type_name)
-            unique_id = str(same_type) if same_type else None
+        """Add a HAP service. Repeat services of one type get distinct IDs.
+
+        Without a `unique_id`, a service is keyed on the registry ID of the
+        first entity it watches, so services coming and going never shift the
+        IDs of the others.
+        """
         svc = ServiceSpec(self, type_name, unique_id, primary)
         self.services.append(svc)
         if linked_to is not None:
@@ -117,6 +131,23 @@ class AccessorySpec:
 
     def claim(self, *entity_ids: str) -> None:
         self._ctx.claim(*entity_ids)
+
+    def unique_ids(self) -> dict[int, str | None]:
+        """Unique ID per service (keyed by `id(service)`), distinct within a type."""
+        out: dict[int, str | None] = {}
+        taken: set[tuple[str, str | None]] = set()
+        for svc in self.services:
+            base = svc.explicit_unique_id
+            if base is None:
+                entries = (self._ctx.entry(eid) for eid in svc.watched())
+                base = next((e.id for e in entries if e is not None), None)
+            uid, n = base, 0
+            while (svc.type_name, uid) in taken:
+                n += 1
+                uid = str(n) if base is None else f"{base}:{n}"
+            taken.add((svc.type_name, uid))
+            out[id(svc)] = uid
+        return out
 
 
 class HapContext:
@@ -148,7 +179,12 @@ class HapContext:
         Defaults to the device ID, suffixed for a second accessory on one device.
         """
         if key is None:
-            base = f"device:{self.device.id}" if self.device else "orphan"
+            if self.device is not None:
+                base = f"device:{self.device.id}"
+            else:
+                # Device-less contexts each hold their own entities; key on them so
+                # two such contexts never share an AID.
+                base = "orphan:" + ",".join(sorted(e.id for e in self.entries))
             key = base if not self.accessories else f"{base}:{len(self.accessories)}"
         if name is None:
             name = self._device_name()

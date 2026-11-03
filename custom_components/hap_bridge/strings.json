@@ -16,5 +16,11 @@
         "data": { "include_integrations": "Only expose devices from these integrations (empty = all)" }
       }
     }
+  },
+  "issues": {
+    "start_failed": {
+      "title": "HAP Bridge {name} failed to start",
+      "description": "The bridge could not start, so its accessories are unavailable in HomeKit.\n\nError: {error}\n\nCheck the log for details, then reload the integration."
+    }
   }
 }

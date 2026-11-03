@@ -21,6 +21,20 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
     if sum(1 for s in spec.services if s.primary) > 1:
         errors.append("more than one primary service")
 
+    explicit: set[tuple[str, str]] = set()
+    for svc in spec.services:
+        if (uid := svc.explicit_unique_id) is not None:
+            if (svc.type_name, uid) in explicit:
+                errors.append(f"two {svc.type_name} services with unique_id {uid!r}")
+            explicit.add((svc.type_name, uid))
+        elif not svc.watched() and any(
+            s is not svc and s.type_name == svc.type_name for s in spec.services
+        ):
+            warnings.append(
+                f"{svc.type_name} repeats but watches nothing and has no unique_id; "
+                "its HomeKit IDs depend on service order"
+            )
+
     for svc in spec.services:
         info = loader.serv_types.get(svc.type_name)
         if info is None:
