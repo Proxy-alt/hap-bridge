@@ -206,6 +206,8 @@ class AccessorySpec:
         # Which step built it, e.g. "integration:acme", "profile:air_purifier",
         # "fallback". Shown in diagnostics and previews.
         self.source = ctx.source
+        # The device it was built from, for its area (room hints).
+        self.device_id: str | None = ctx.device.id if ctx.device is not None else None
         self.services: list[ServiceSpec] = []
         self.info: dict[str, str | None] = {}
         # Overrides the default "No Response" rule; see is_available().

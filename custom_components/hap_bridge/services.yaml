@@ -28,3 +28,10 @@ remove_pairing:
       selector:
         config_entry:
           integration: hap_bridge
+
+room_assignments:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: hap_bridge

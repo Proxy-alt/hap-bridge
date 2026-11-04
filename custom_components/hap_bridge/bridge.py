@@ -29,6 +29,11 @@ from homeassistant.components import zeroconf
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_PORT
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import STORAGE_DIR, Store
@@ -288,6 +293,46 @@ class HapBridge:
         driver.async_update_advertisement()
         self._async_show_pairing(unit)
         _LOGGER.info("Removed all pairings from %s", unit.name)
+
+    def room_assignments(self) -> dict[str, Any]:
+        """Where each published accessory belongs, from Home Assistant areas.
+
+        Keyed by serial number, which a Home app-side tool reads back to find
+        the accessory whatever it's been renamed to (see scripts/assign_rooms.py).
+        An entity's own area wins over its device's.
+        """
+        areas = ar.async_get(self.hass)
+        devices = dr.async_get(self.hass)
+        entities = er.async_get(self.hass)
+        placed: list[dict[str, Any]] = []
+        without: list[str] = []
+        for unit in self.units.values():
+            for spec, acc in unit.accessories:
+                area_id = None
+                primary = next((s for s in spec.services if s.primary), None)
+                watched = (primary.watched() if primary else []) or [
+                    eid for s in spec.services for eid in s.watched()]
+                if spec.camera:
+                    watched = [spec.camera, *watched]
+                for entity_id in watched:
+                    if (entry := entities.async_get(entity_id)) and entry.area_id:
+                        area_id = entry.area_id
+                        break
+                if area_id is None and spec.device_id:
+                    if (device := devices.async_get(spec.device_id)) and device.area_id:
+                        area_id = device.area_id
+                area = areas.async_get_area(area_id) if area_id else None
+                if area is None:
+                    without.append(spec.name)
+                    continue
+                placed.append({
+                    "serial": acc.get_service("AccessoryInformation")
+                    .get_characteristic("SerialNumber").value,
+                    "name": spec.name,
+                    "room": area.name,
+                    "unit": unit.name,
+                })
+        return {"accessories": placed, "without_area": sorted(without)}
 
     def pairings(self) -> list[dict[str, Any]]:
         """Each unit's paired controllers (one per Apple ID / home hub key)."""

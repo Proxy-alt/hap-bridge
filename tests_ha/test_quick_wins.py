@@ -170,3 +170,39 @@ async def test_camera_options_save_prebuffer_choice(hass, config_entry):
     assert config_entry.options["camera_no_prebuffer"] == ["camera.porch"]
     acc = next(u.root for u in config_entry.runtime_data.units.values() if u.name == "Porch")
     assert acc.recording._prebuffer_wanted is False
+
+
+async def test_room_assignments_from_areas(hass, config_entry):
+    from homeassistant.helpers import area_registry as ar
+
+    office = ar.async_get(hass).async_create("Office")
+    hall = ar.async_get(hass).async_create("Hall")
+    lamp, sensor = _device(
+        hass, "Desk",
+        ("light", "desk", {}, "on"),
+        ("binary_sensor", "door", {"original_device_class": "door", "original_name": "Door"},
+         "off"))
+    (lone,) = _device(hass, "Nowhere", ("switch", "lone", {}, "off"))
+    device_id = er.async_get(hass).async_get(lamp).device_id
+    dr.async_get(hass).async_update_device(device_id, area_id=office.id)
+    # The door sensor's own area wins over its device's.
+    er.async_get(hass).async_update_entity(sensor, area_id=hall.id)
+    bridge = await _setup(hass, config_entry)
+
+    result = await hass.services.async_call(DOMAIN, "room_assignments", {}, blocking=True,
+                                            return_response=True)
+    rooms = {item["name"]: item["room"] for item in result["accessories"]}
+    serials = [item["serial"] for item in result["accessories"]]
+    assert rooms == {"light.desk": "Office", "Door": "Hall"}
+    assert len(set(serials)) == len(serials) and all(s.startswith("HB-") for s in serials)
+    assert result["without_area"] == [lone]
+
+    # The serial is what HomeKit sees, and it's stable across restarts.
+    acc = _acc(bridge, lamp)
+    serial = acc.get_service("AccessoryInformation").get_characteristic("SerialNumber").value
+    assert serial in serials
+    assert await hass.config_entries.async_reload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    again = _acc(config_entry.runtime_data, lamp)
+    assert again.get_service("AccessoryInformation").get_characteristic(
+        "SerialNumber").value == serial

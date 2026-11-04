@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import hashlib
 import inspect
 import logging
 from types import ModuleType
@@ -132,7 +133,25 @@ async def async_collect_specs(
             result.specs.extend(ctx.accessories)
 
     apply_options(entry.options, result.specs)
+    assign_serials(entry.entry_id, result.specs)
     return result
+
+
+def serial_number(entry_id: str, key: str) -> str:
+    """A serial number unique to one accessory of one bridge, and stable.
+
+    It's how tools on the Home app side (e.g. HomeClaw) can find exactly this
+    accessory: the Home app's own IDs never reach the accessory, and names
+    change when you rename things in the Home app. A device's real serial
+    number isn't used because the same device may also be in HomeKit natively.
+    """
+    digest = hashlib.sha1(f"{entry_id}|{key}".encode()).hexdigest()[:10].upper()
+    return f"HB-{digest}"
+
+
+def assign_serials(entry_id: str, specs: list[AccessorySpec]) -> None:
+    for spec in specs:
+        spec.info["serial_number"] = serial_number(entry_id, spec.key)
 
 
 def apply_options(options: Mapping[str, Any], specs: list[AccessorySpec]) -> None:

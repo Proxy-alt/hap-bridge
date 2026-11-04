@@ -100,6 +100,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             translation_placeholders={"pairing_id": call.data["pairing_id"]},
         )
 
+    async def _room_assignments(call: ServiceCall) -> ServiceResponse:
+        entry = _preview_entry(hass, call.data.get("config_entry_id"))
+        return entry.runtime_data.room_assignments()
+
+    hass.services.async_register(
+        DOMAIN, "room_assignments", _room_assignments,
+        schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),
+        supports_response=SupportsResponse.ONLY,
+    )
     hass.services.async_register(
         DOMAIN, "list_pairings", _list_pairings,
         schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),

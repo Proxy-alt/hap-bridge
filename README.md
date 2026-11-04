@@ -384,6 +384,34 @@ warns about that. A profile can:
 It's only offered. Each light stays on its normal color until someone turns
 Adaptive Lighting on for it in the Home app.
 
+## Rooms
+
+HomeKit has no way for an accessory to say which room it's in. Rooms live in
+the Home app, which asks you to pick one for each accessory when you add the
+bridge. To match your Home Assistant areas instead, use
+`scripts/assign_rooms.py` with [HomeClaw](https://github.com/omarshahine/HomeClaw),
+a free Mac app with HomeKit access:
+
+```bash
+export HA_TOKEN=...   # a long-lived access token from your HA profile page
+python3 scripts/assign_rooms.py --url http://homeassistant.local:8123          # preview
+python3 scripts/assign_rooms.py --url http://homeassistant.local:8123 --apply  # move them
+```
+
+- The `hap_bridge.room_assignments` action lists each accessory with the area
+  it belongs in. An entity's own area wins over its device's.
+- Each accessory has its own serial number (`HB-` plus a hash of the bridge
+  and the accessory's stable key). The script reads it back through HomeClaw,
+  so accessories are found even if you've renamed them in the Home app.
+  A device's real serial number isn't used, because the same device may also
+  be in HomeKit natively.
+- HomeClaw creates rooms that don't exist yet and leaves accessories that are
+  already in the right room alone. Accessories with no area, or not found in
+  the Home app, are listed and left where they are.
+- It only runs when you run it, for example after pairing or adding devices.
+  HomeClaw must be running on the Mac and signed in to your home. It gets full
+  access to your home, so only use it if you're happy with that.
+
 ## Stable IDs
 
 Home keys rooms, scenes and automations on AID/IID. AIDs are keyed on the

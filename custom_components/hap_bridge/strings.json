@@ -75,6 +75,13 @@
     }
   },
   "services": {
+    "room_assignments": {
+      "name": "Room assignments",
+      "description": "Lists each accessory HomeKit gets, by serial number, with the Home Assistant area it belongs in. scripts/assign_rooms.py uses this with HomeClaw to put accessories in the matching Home app rooms.",
+      "fields": {
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: the first)." }
+      }
+    },
     "list_pairings": {
       "name": "List pairings",
       "description": "Shows the controllers paired with each part of a bridge (the bridge itself, and each TV and camera): one per Apple ID or home hub key, and which are admins.",
