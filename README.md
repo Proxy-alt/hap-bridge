@@ -348,6 +348,9 @@ Turn it on in the camera's settings in the Home app. You need a home hub
   `recording.py` and `hds.py`.
 
 By default the camera's motion sensor and its doorbell start recordings.
+The motion sensor can be a binary sensor or, for cameras that report
+motion as events (Nest and others), an `event` entity with the `motion`
+device class. Each event counts as motion for 20 seconds.
 A profile can choose other entities, for example the person and vehicle
 sensors many cameras have:
 
@@ -368,6 +371,9 @@ ctx.blocks.camera(
 - If only people and vehicles start recordings, choosing "animals" in the
   Home app won't catch anything, because the hub only analyses what gets
   recorded.
+- Motion entities can also be `event` entities. If the entity fires for
+  other things too (sounds, rings), `"motion_events": ["motion", "person"]`
+  in `recording` picks the event types that count.
 - `recording=False` turns HomeKit Secure Video off for that camera. The
   preview shows each camera's triggers.
 
@@ -558,7 +564,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 
 ## Not done yet
 
-- **WebRTC cameras are tried with one integration only.** Google Home Expanded's Nest cameras stream live; HomeKit Secure Video and other WebRTC integrations (Nest, Ring) haven't been tried.
+- **WebRTC cameras are tried with one integration only.** Google Home Expanded's Nest cameras stream live; HomeKit Secure Video and other WebRTC integrations (Nest, Ring) haven't been tried. With Google Home Expanded, recordings start on the camera's motion events, which arrive on a 60-second poll, so a clip can begin up to a minute after the motion.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
 - **Cameras have no talk-back.** HomeKit Secure Video hasn't been tried with a real home hub yet.
 - **Speakers have no volume in Home.** They're switches; HomeKit only has a volume control for TVs (and AirPlay speakers).

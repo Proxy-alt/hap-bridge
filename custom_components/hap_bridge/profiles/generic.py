@@ -164,7 +164,8 @@ def camera(ctx: HapContext) -> None:
     if not cameras_:
         return
     bell = ctx.entity("event", device_class="doorbell")
-    motion = ctx.entity("binary_sensor", device_class="motion")
+    motion = (ctx.entity("binary_sensor", device_class="motion")
+              or ctx.entity("event", device_class="motion"))
     # Night vision etc. only show in Home with HomeKit Secure Video; without
     # it (no motion sensor or doorbell) the switches stay ordinary switches.
     settings = cameras.camera_settings(ctx)

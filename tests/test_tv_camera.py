@@ -157,3 +157,68 @@ def test_plain_camera(hass, loader):
     _assert_valid(ctx, loader)
     (acc,) = ctx.accessories
     assert (acc.camera, acc.category, acc.services) == ("camera.yard", "CAMERA", [])
+
+
+def _event_camera(hass, *, motion_class="motion"):
+    hass.states.set("camera.porch", "idle")
+    hass.states.set("event.porch", "2026-11-01T10:00:00+00:00", event_type="motion")
+    ctx = HapContext(hass, make_device(), [
+        make_entry("camera.porch"),
+        make_entry("event.porch", device_class=motion_class),
+    ])
+    _run(ctx)
+    return ctx
+
+
+def test_camera_records_on_a_motion_event_entity(hass, loader):
+    from datetime import datetime, timezone
+
+    ctx = _event_camera(hass)
+    _assert_valid(ctx, loader)
+    (acc,) = ctx.accessories
+    assert acc.recording.motion == ("event.porch",)
+    motion = _services(acc, "MotionSensor")[0].chars["MotionDetected"]
+    # An old event isn't motion now, and nothing will change by itself.
+    assert motion.get() is False and motion.recheck() is None
+    assert acc.motion_active() is False
+    hass.states.set("event.porch", datetime.now(timezone.utc).isoformat(), event_type="motion")
+    assert motion.get() is True and acc.motion_active() is True
+    assert 15 < motion.recheck() <= 20
+
+
+def test_event_entity_without_motion_class_isnt_a_trigger(hass):
+    ctx = _event_camera(hass, motion_class=None)
+    (acc,) = ctx.accessories
+    assert acc.recording is None
+
+
+def test_motion_events_hold_and_filter(hass):
+    from datetime import datetime, timedelta, timezone
+
+    from hb.profiles.cameras import MotionTriggers
+
+    ctx = HapContext(hass, None, [])
+    clock = [datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)]
+    trig = MotionTriggers(ctx, ["event.cam", "binary_sensor.pir"], ["motion", "person"],
+                          now=lambda: clock[0])
+    hass.states.set("binary_sensor.pir", "off")
+
+    def fire(kind, seconds_ago=0):
+        when = clock[0] - timedelta(seconds=seconds_ago)
+        hass.states.set("event.cam", when.isoformat(), event_type=kind)
+
+    fire("sound")  # not a kind that counts
+    assert not trig.is_on() and trig.seconds_left() is None
+    fire("person", seconds_ago=5)
+    assert trig.is_on() and trig.seconds_left() == 15
+    # A sound right after doesn't cut the person's motion short.
+    fire("sound")
+    assert trig.is_on() and trig.seconds_left() == 15
+    clock[0] += timedelta(seconds=16)
+    assert not trig.is_on() and trig.seconds_left() is None
+    # Binary sensors still count by their state.
+    hass.states.set("binary_sensor.pir", "on")
+    assert trig.is_on() and trig.seconds_left() is None
+    hass.states.set("binary_sensor.pir", "off")
+    hass.states.set("event.cam", "unavailable")
+    assert not trig.is_on()

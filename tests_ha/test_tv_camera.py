@@ -266,3 +266,56 @@ async def test_recording_triggers_from_a_profile(hass):
 
     with pytest.raises(ValueError, match="recording must be a dict"):
         await testing.async_describe(bad, entries, hass=hass_)
+
+
+async def test_motion_event_turns_off_by_itself(hass, config_entry):
+    from datetime import timedelta
+
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    from homeassistant.util import dt as dt_util
+
+    source = MockConfigEntry(domain="acme")
+    source.add_to_hass(hass)
+    dev_reg, ent_reg = dr.async_get(hass), er.async_get(hass)
+    dev = dev_reg.async_get_or_create(
+        config_entry_id=source.entry_id, identifiers={("x", "porch")}, name="Porch")
+    cam = ent_reg.async_get_or_create("camera", "acme", "porch", device_id=dev.id)
+    event = ent_reg.async_get_or_create(
+        "event", "acme", "porch_motion", device_id=dev.id, original_device_class="motion")
+    hass.states.async_set(cam.entity_id, "idle")
+    hass.states.async_set(event.entity_id, "2026-11-01T10:00:00+00:00", {"event_type": "motion"})
+
+    bridge = await _setup(hass, config_entry)
+    porch = _unit(bridge, "Porch").root
+    detected = porch.get_service("MotionSensor").get_characteristic("MotionDetected")
+    assert porch.recording.triggers.bits == 0x01  # motion
+    assert detected.get_value() is False
+
+    hass.states.async_set(event.entity_id, dt_util.utcnow().isoformat(), {"event_type": "motion"})
+    await hass.async_block_till_done()
+    assert detected.get_value() is True and porch.recording._triggered()
+
+    with patch("custom_components.hap_bridge.profiles.cameras.datetime") as clock:
+        later = dt_util.utcnow() + timedelta(seconds=21)
+        clock.now.return_value = later
+        clock.fromisoformat = __import__("datetime").datetime.fromisoformat
+        async_fire_time_changed(hass, later)
+        await hass.async_block_till_done()
+    assert detected.get_value() is False
+
+
+async def test_event_motion_triggers_from_a_profile(hass):
+    from custom_components.hap_bridge import testing
+
+    async def profile(ctx):
+        ctx.blocks.camera("camera.cam", doorbell="event.cam", recording={
+            "motion": ["event.cam"], "doorbell": "event.cam",
+            "motion_events": ["motion", "person"]})
+
+    entries = [testing.entry("camera.cam"), testing.entry("event.cam")]
+    result = await testing.async_describe(profile, entries)
+    result.assert_valid()
+    rec = result.accessory().recording
+    assert rec.motion == ("event.cam",) and rec.doorbell == "event.cam"
+    assert rec.motion_events == ("motion", "person")

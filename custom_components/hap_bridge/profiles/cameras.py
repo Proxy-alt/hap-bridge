@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
 from typing import Any
 
 from ..api import AccessorySpec, HapContext, Recording
 from .fallback import bind_doorbell
+
+# How long one event of an `event` entity used as a motion trigger counts as
+# motion. Cameras send one event when they see something, not one when it's
+# gone, so this stands in for "motion cleared".
+EVENT_MOTION_SECONDS = 20.0
 
 
 def describe_camera(
@@ -31,6 +38,10 @@ def describe_camera(
     `{"motion": [entity ids], "doorbell": event entity id}`. By default it's
     `motion` and `doorbell`; `False` turns recording off. The Motion Sensor
     shown with the camera is on while any of the motion entities is.
+    Motion entities can be binary sensors or `event` entities; an event
+    counts as motion for EVENT_MOTION_SECONDS. With an `event` entity that
+    also fires for other things, `"motion_events": ["motion", "person"]`
+    picks the event types that count.
 
     `night_vision` and `status_light` (switches) become those settings in the
     camera's Home app settings, and `privacy` (a switch) shows the camera as
@@ -55,9 +66,11 @@ def describe_camera(
     triggers = recording_triggers(recording, motion=motion, doorbell=doorbell)
     motions = list(triggers.motion) if triggers else [motion] if motion else []
     if motions:
+        active = MotionTriggers(ctx, motions, triggers.motion_events if triggers else ())
         acc.service("MotionSensor").char(
-            "MotionDetected", watch=motions, get=lambda: any(ctx.is_on(m) for m in motions)
+            "MotionDetected", watch=motions, get=active.is_on, recheck=active.seconds_left
         )
+        acc.motion_active = active.is_on
     acc.recording = triggers
     if triggers is not None and (night_vision or status_light or privacy):
         mode = acc.service("CameraOperatingMode")
@@ -107,11 +120,16 @@ def recording_triggers(
         return None
     if recording is None or recording is True:
         recording = {"motion": [motion] if motion else [], "doorbell": doorbell}
-    if not isinstance(recording, dict) or set(recording) - {"motion", "doorbell"}:
-        raise ValueError('recording must be a dict with "motion" and/or "doorbell"')
+    if not isinstance(recording, dict) or set(recording) - {"motion", "doorbell", "motion_events"}:
+        raise ValueError(
+            'recording must be a dict with "motion" and/or "doorbell" (and "motion_events")'
+        )
     moving = recording.get("motion") or ()
     if isinstance(moving, str):
         moving = (moving,)
+    kinds = recording.get("motion_events") or ()
+    if isinstance(kinds, str):
+        kinds = (kinds,)
     bell = recording.get("doorbell")
     if bell is not None and bell != doorbell:
         raise ValueError(
@@ -119,4 +137,68 @@ def recording_triggers(
         )
     if not moving and bell is None:
         return None  # nothing could start a recording
-    return Recording(motion=tuple(moving), doorbell=bell)
+    return Recording(motion=tuple(moving), doorbell=bell, motion_events=tuple(kinds))
+
+
+class MotionTriggers:
+    """Whether any of a camera's motion entities is on.
+
+    A binary sensor is on while its state is. An `event` entity is on for
+    EVENT_MOTION_SECONDS after an event of one of `kinds` (any kind if
+    empty). Its state is the time of its last event and `event_type` that
+    event's kind, so a later event of another kind (a sound after a person)
+    would hide the one that counts; the last one seen is remembered, which
+    works because MotionDetected watches these entities and reads every change.
+    """
+
+    def __init__(
+        self,
+        ctx: HapContext,
+        entities: Iterable[str],
+        kinds: Iterable[str] = (),
+        *,
+        hold: float = EVENT_MOTION_SECONDS,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self._ctx = ctx
+        self._entities = tuple(entities)
+        self._kinds = frozenset(kinds)
+        self._hold = hold
+        self._now = now
+        self._last: dict[str, datetime] = {}
+
+    def _event_left(self, entity_id: str, now: datetime) -> float:
+        """Seconds of motion left from an event entity's last counted event."""
+        state = self._ctx.state(entity_id)
+        if state is not None and state.state not in ("unavailable", "unknown"):
+            kind = state.attributes.get("event_type")
+            if not self._kinds or kind in self._kinds:
+                try:
+                    when = datetime.fromisoformat(state.state)
+                except ValueError:
+                    when = None
+                if when is not None:
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    if entity_id not in self._last or when > self._last[entity_id]:
+                        self._last[entity_id] = when
+        last = self._last.get(entity_id)
+        if last is None:
+            return 0.0
+        return max(0.0, self._hold - (now - last).total_seconds())
+
+    def seconds_left(self) -> float | None:
+        """Until an event's motion runs out by itself; None if none will."""
+        now = self._now()
+        left = [
+            t for eid in self._entities
+            if eid.startswith("event.") and (t := self._event_left(eid, now)) > 0
+        ]
+        return min(left) if left else None
+
+    def is_on(self) -> bool:
+        now = self._now()
+        return any(
+            self._event_left(eid, now) > 0 if eid.startswith("event.") else self._ctx.is_on(eid)
+            for eid in self._entities
+        )

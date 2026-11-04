@@ -35,7 +35,7 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.storage import STORAGE_DIR, Store
 
 from . import issues, pairing
@@ -100,6 +100,8 @@ class HapBridge:
         self.problems: list[Problem] = []
         self._bindings: dict[str, list[tuple[Characteristic, CharSpec]]] = defaultdict(list)
         self._unsub_state: Callable[[], None] | None = None
+        # Pending re-reads of characteristics with a `recheck`, by id(char).
+        self._rechecks: dict[int, Callable[[], None]] = {}
 
     @property
     def started(self) -> bool:
@@ -260,6 +262,9 @@ class HapBridge:
         if self._unsub_state:
             self._unsub_state()
             self._unsub_state = None
+        for cancel in self._rechecks.values():
+            cancel()
+        self._rechecks.clear()
         for unit in self.units.values():
             for _spec, acc in unit.accessories:
                 if (stop_streams := getattr(acc, "async_stop_streams", None)) is not None:
@@ -599,13 +604,11 @@ class HapBridge:
         for char, char_spec in self._bindings.get(event.data["entity_id"], ()):
             self._push(char, char_spec)
 
-    @classmethod
-    def _push_all(cls, bound: list[tuple[Characteristic, CharSpec]]) -> None:
+    def _push_all(self, bound: list[tuple[Characteristic, CharSpec]]) -> None:
         for char, char_spec in bound:
-            cls._push(char, char_spec)
+            self._push(char, char_spec)
 
-    @staticmethod
-    def _push(char: Characteristic, char_spec: CharSpec) -> None:
+    def _push(self, char: Characteristic, char_spec: CharSpec) -> None:
         if char_spec.get is None:
             return
         try:
@@ -614,6 +617,28 @@ class HapBridge:
                 char.set_value(value)
         except Exception:  # noqa: BLE001 - a broken getter only affects its own value
             _LOGGER.exception("Reading %s failed", char_spec.name)
+        if char_spec.recheck is not None:
+            self._schedule_recheck(char, char_spec)
+
+    def _schedule_recheck(self, char: Characteristic, char_spec: CharSpec) -> None:
+        """Read the value again once it may have changed by itself."""
+        assert char_spec.recheck is not None
+        if (cancel := self._rechecks.pop(id(char), None)) is not None:
+            cancel()
+        try:
+            delay = char_spec.recheck()
+        except Exception:  # noqa: BLE001 - as for a broken getter
+            _LOGGER.exception("Rechecking %s failed", char_spec.name)
+            return
+        if delay is None:
+            return
+
+        @callback
+        def _again(_now: Any) -> None:
+            self._rechecks.pop(id(char), None)
+            self._push(char, char_spec)
+
+        self._rechecks[id(char)] = async_call_later(self.hass, max(delay, 0.1), _again)
 
 
 class _Driver(AccessoryDriver):

@@ -164,6 +164,8 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         key = f"hksv:{self.spec.key}"
 
         def triggered() -> bool:
+            if self.spec.motion_active is not None:
+                return self.spec.motion_active()
             return any(
                 (state := self.hass.states.get(eid)) is not None and state.state == "on"
                 for eid in triggers.motion

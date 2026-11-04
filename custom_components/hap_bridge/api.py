@@ -64,6 +64,10 @@ class Recording:
 
     motion: tuple[str, ...] = ()
     doorbell: str | None = None
+    # For `motion` entities that are `event` entities: the event types that
+    # count as motion (empty: any). Each such event is motion for
+    # EVENT_MOTION_SECONDS.
+    motion_events: tuple[str, ...] = ()
 
 
 @dataclass
@@ -75,6 +79,7 @@ class CharSpec:
     props: dict[str, Any] = field(default_factory=dict)
     valid_values: dict[str, Any] | None = None
     affects_available: bool = True
+    recheck: Callable[[], float | None] | None = None
 
 
 class ServiceSpec:
@@ -120,6 +125,7 @@ class ServiceSpec:
         props: dict[str, Any] | None = None,
         valid_values: dict[str, Any] | None = None,
         affects_available: bool = True,
+        recheck: Callable[[], float | None] | None = None,
     ) -> ServiceSpec:
         """Bind a characteristic. Returns the service so calls can chain.
 
@@ -128,12 +134,15 @@ class ServiceSpec:
         called with the raw HAP value when a controller writes; it may return a
         coroutine (e.g. from `ctx.call`). With `affects_available=False` the
         watched entities don't count towards the accessory's "No Response"
-        (for side details such as battery or tamper flags).
+        (for side details such as battery or tamper flags). `recheck`, for a
+        value that changes with time as well as with state, says after each
+        read how many seconds until `get` should be read again (None: not
+        until a watched entity changes).
         """
         watch = tuple(watch)
         self._owner.claim(*watch)
         self.chars[name] = CharSpec(
-            name, get, set, watch, props or {}, valid_values, affects_available
+            name, get, set, watch, props or {}, valid_values, affects_available, recheck
         )
         return self
 
@@ -197,6 +206,8 @@ class AccessorySpec:
         self.camera_audio = False
         # HomeKit Secure Video triggers; None means the camera can't record.
         self.recording: Recording | None = None
+        # Whether the recording's motion triggers are on now (set with them).
+        self.motion_active: Callable[[], bool] | None = None
         # Keep ffmpeg running so recordings start before their trigger.
         self.camera_prebuffer = True
         # For cameras that only stream over WebRTC: the H.264 profile to ask

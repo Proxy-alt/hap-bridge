@@ -270,7 +270,9 @@ class Blocks:
         `recording` picks what starts a HomeKit Secure Video recording, e.g.
         `{"motion": ["binary_sensor.person", "binary_sensor.vehicle"],
         "doorbell": "event.ring"}`; by default `motion` and `doorbell`, and
-        `False` turns it off. `night_vision`, `status_light` and `privacy`
+        `False` turns it off. Motion entities may be `event` entities, each
+        event counting as motion for a while; `"motion_events": ["motion",
+        "person"]` in `recording` limits that to those event types. `night_vision`, `status_light` and `privacy`
         (switches) appear in the camera's settings in the Home app.
         `video_profile` ("baseline", "main", "high") is the H.264 profile to
         ask a WebRTC-only camera for; see AccessorySpec.camera_video_profile.
@@ -279,14 +281,14 @@ class Blocks:
         if doorbell is not None:
             self._entry(doorbell, "event")
         if motion is not None:
-            self._entry(motion, "binary_sensor")
+            self._entry(motion, "binary_sensor", "event")
         for eid in (night_vision, status_light, privacy):
             if eid is not None:
                 self._entry(eid, "switch")
         if isinstance(recording, dict):
             moving = recording.get("motion") or ()
             for eid in [moving] if isinstance(moving, str) else moving:
-                self._entry(eid, "binary_sensor")
+                self._entry(eid, "binary_sensor", "event")
         return cameras.describe_camera(
             self._ctx, camera, doorbell=doorbell, motion=motion, audio=audio,
             recording=recording, night_vision=night_vision, status_light=status_light,
