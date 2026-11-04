@@ -314,10 +314,13 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   `blocks.camera(..., live_snapshots=True)`. Then each snapshot the Home app
   asks for, which it does every few seconds while it shows the camera, is a
   frame that go2rtc takes from the live stream. If go2rtc can't take one in
-  10 seconds, the camera's own image is used. For a WebRTC-only camera,
-  each snapshot opens its stream, which closes again 30 seconds after the
-  last viewer, so thumbnails cost data and battery while the Home app is
-  open on them.
+  10 seconds, the camera's own image is used. While snapshots keep coming
+  (the Home app, or the home hub, is showing the camera), go2rtc keeps the
+  stream open between them instead of reconnecting for each. 30 seconds
+  after the last one it lets go, and the stream closes. So a WebRTC-only
+  camera streams, costing data and battery, only while something's
+  looking at it. Controllers asking within 5 seconds of each other get the
+  same frame.
 - If the device also has a doorbell `event` entity, the camera becomes a video
   doorbell, and rings show on your devices with a snapshot.
 - If the device has a motion binary sensor, it's added for motion

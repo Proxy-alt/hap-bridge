@@ -55,6 +55,12 @@ OTHER_RTSP_PORT = 8554
 ANSWER_TIMEOUT = 20.0
 # How long go2rtc gets to take a snapshot (open the stream, wait for a keyframe).
 FRAME_TIMEOUT = 10.0
+# A snapshot go2rtc took this recently is reused (several controllers poll).
+FRAME_CACHE = "5s"
+# While snapshots keep coming (the Home app or the home hub is showing the
+# camera), go2rtc keeps the stream open ("preload") so each one doesn't
+# reconnect; this long after the last one, it lets go.
+WARM_SECONDS = 30.0
 # After the answer, how long to wait for more trickled candidates.
 CANDIDATE_QUIET = 0.5
 CANDIDATE_MAX = 2.0
@@ -92,6 +98,10 @@ class WebRtcBridge:
         self._local_port: int | None = None
         self._local_lock = asyncio.Lock()
         self._video_profiles: dict[str, str | None] = {}
+        # The source we last gave go2rtc for each camera's stream.
+        self._sources: dict[str, str] = {}
+        # Cameras go2rtc is keeping open for snapshots: stops the preload.
+        self._warm: dict[str, CALLBACK_TYPE] = {}
 
     @classmethod
     def get(cls, hass: HomeAssistant) -> WebRtcBridge:
@@ -127,8 +137,12 @@ class WebRtcBridge:
         except OSError as err:
             _LOGGER.error("%s: couldn't listen for go2rtc: %s", entity_id, err)
             return None
-        if not await self._async_put_stream(config, entity_id, source):
-            return None
+        # Replacing a stream go2rtc already has would cut off its viewers
+        # (another HomeKit stream, a snapshot preload); only add a new one.
+        if not (self._sources.get(entity_id) == source
+                and await self._async_has_stream(config, entity_id)):
+            if not await self._async_put_stream(config, entity_id, source):
+                return None
         return f"-rtsp_transport tcp -i {self._rtsp_base(config.url)}/{name}"
 
     async def _async_put_stream(self, config: Any, entity_id: str, source: str) -> bool:
@@ -141,6 +155,7 @@ class WebRtcBridge:
         except Exception as err:  # noqa: BLE001 - reported, then no stream
             _LOGGER.error("%s: couldn't add the camera to go2rtc: %s", entity_id, err)
             return False
+        self._sources[entity_id] = source
         return True
 
     async def async_frame(
@@ -169,7 +184,8 @@ class WebRtcBridge:
                     return None
                 if not source or not await self._async_put_stream(config, entity_id, source):
                     return None
-        params = {"src": stream_name(entity_id)}
+        await self._async_keep_warm(config, entity_id)
+        params = {"src": stream_name(entity_id), "cache": FRAME_CACHE}
         if height:
             params["h"] = str(height)
         try:
@@ -182,6 +198,37 @@ class WebRtcBridge:
             _LOGGER.debug("%s: go2rtc couldn't take a snapshot: %r", entity_id, err)
             return None
         return image or None
+
+    async def _async_keep_warm(self, config: Any, entity_id: str) -> None:
+        """Keep go2rtc's stream open until WARM_SECONDS after this snapshot."""
+        if (cancel := self._warm.pop(entity_id, None)) is not None:
+            cancel()
+        else:
+            await self._async_preload(config, entity_id, start=True)
+
+        async def cool(_now: Any) -> None:
+            if self._warm.pop(entity_id, None) is None:
+                return
+            if (current := self.hass.data.get(GO2RTC)) is not None:
+                await self._async_preload(current, entity_id, start=False)
+
+        self._warm[entity_id] = async_call_later(self.hass, WARM_SECONDS, cool)
+
+    async def _async_preload(self, config: Any, entity_id: str, *, start: bool) -> None:
+        """Start or stop go2rtc's preload of the stream: a viewer of its own,
+        which keeps the stream open without anyone watching."""
+        request = config.session.put if start else config.session.delete
+        try:
+            async with request(
+                f"{config.url.rstrip('/')}/api/preload", params={"src": stream_name(entity_id)},
+            ) as response:
+                response.raise_for_status()
+        except Exception as err:  # noqa: BLE001 - snapshots just reconnect each time
+            _LOGGER.debug("%s: go2rtc preload %s failed: %r",
+                          entity_id, "start" if start else "stop", err)
+            return
+        _LOGGER.debug("%s: go2rtc %s the stream open for snapshots",
+                      entity_id, "keeps" if start else "no longer keeps")
 
     async def _async_has_stream(self, config: Any, entity_id: str) -> bool:
         try:
@@ -363,6 +410,12 @@ class WebRtcBridge:
         self._close_sessions(camera, state)
 
     async def async_shutdown(self) -> None:
+        config = self.hass.data.get(GO2RTC)
+        for entity_id, cancel in list(self._warm.items()):
+            cancel()
+            if config is not None:
+                await self._async_preload(config, entity_id, start=False)
+        self._warm.clear()
         for entity_id in list(self._cameras):
             await self.async_release(entity_id)
         if self._runner is not None:

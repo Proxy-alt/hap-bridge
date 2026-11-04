@@ -81,9 +81,18 @@ class FakeGo2rtc:
     def __init__(self) -> None:
         self.added: list[dict[str, str]] = []
         self.consumers: list[Any] = []
+        self.preloads: list[tuple[str, str]] = []  # ("start" or "stop", stream)
 
     def put(self, url, params):
-        self.added.append({"url": url, **params})
+        if url.endswith("/api/preload"):
+            self.preloads.append(("start", params["src"]))
+        else:
+            self.added.append({"url": url, **params})
+        return _Response({})
+
+    def delete(self, url, params):
+        assert url.endswith("/api/preload")
+        self.preloads.append(("stop", params["src"]))
         return _Response({})
 
     def get(self, url, params):
@@ -389,10 +398,11 @@ async def test_go2rtc_takes_live_snapshots(hass: HomeAssistant):
     assert await bridge.async_frame(nest.entity_id, height=720) == b"jpeg"
     (added,) = go2rtc.added
     assert added["src"].startswith("webrtc:")
-    assert go2rtc.frames == [{"src": "hap_bridge_camera_doorbell", "h": "720"}]
+    name = "hap_bridge_camera_doorbell"
+    assert go2rtc.frames == [{"src": name, "cache": "5s", "h": "720"}]
     # A stream go2rtc already has isn't replaced: live video may be reading it.
     assert await bridge.async_frame(nest.entity_id) == b"jpeg"
-    assert len(go2rtc.added) == 1 and go2rtc.frames[-1] == {"src": "hap_bridge_camera_doorbell"}
+    assert len(go2rtc.added) == 1 and go2rtc.frames[-1] == {"src": name, "cache": "5s"}
 
     # A camera with a stream source: go2rtc reads that.
     assert await bridge.async_frame(shed.entity_id) == b"jpeg"
@@ -400,4 +410,54 @@ async def test_go2rtc_takes_live_snapshots(hass: HomeAssistant):
 
     go2rtc.frame = None  # go2rtc couldn't get a frame
     assert await bridge.async_frame(nest.entity_id) is None
+    await bridge.async_shutdown()
+
+
+async def test_stream_stays_open_while_snapshots_keep_coming(hass: HomeAssistant, freezer):
+    from datetime import timedelta
+
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    nest, _ = await _cameras(hass)
+    bridge = webrtc.WebRtcBridge.get(hass)
+    bridge._async_local_port = AsyncMock(return_value=40002)
+    go2rtc = FrameGo2rtc()
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=go2rtc)
+    name = "hap_bridge_camera_doorbell"
+
+    async def wait(seconds):
+        freezer.tick(timedelta(seconds=seconds))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+
+    await bridge.async_frame(nest.entity_id)
+    assert go2rtc.preloads == [("start", name)]
+    # Another snapshot 20 seconds later (still being watched): kept open.
+    await wait(20)
+    await bridge.async_frame(nest.entity_id)
+    await wait(20)
+    assert go2rtc.preloads == [("start", name)]
+    # Nothing asked for 30 seconds after the last one: let go.
+    await wait(11)
+    assert go2rtc.preloads == [("start", name), ("stop", name)]
+
+    # Watching again starts it again; shutting down stops it.
+    await bridge.async_frame(nest.entity_id)
+    await bridge.async_shutdown()
+    assert go2rtc.preloads[-2:] == [("start", name), ("stop", name)]
+
+
+async def test_live_video_doesnt_replace_a_stream_go2rtc_has(hass: HomeAssistant):
+    nest, _ = await _cameras(hass)
+    bridge = webrtc.WebRtcBridge.get(hass)
+    bridge._async_local_port = AsyncMock(return_value=40002)
+    go2rtc = FrameGo2rtc()
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=go2rtc)
+    await bridge.async_frame(nest.entity_id)  # snapshots added it
+    assert await bridge.async_source(nest.entity_id)
+    assert len(go2rtc.added) == 1
+    # go2rtc lost it (restarted): added again.
+    go2rtc.added = []
+    assert await bridge.async_source(nest.entity_id)
+    assert len(go2rtc.added) == 1
     await bridge.async_shutdown()
