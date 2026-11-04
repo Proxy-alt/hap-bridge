@@ -87,10 +87,19 @@ def plan(
 # -- talking to Home Assistant and HomeClaw ---------------------------------------------
 
 
+def normalize_url(url: str) -> str:
+    """Accept bare hosts like 192.168.1.5:8123; port 443 implies https."""
+    url = url.strip().rstrip("/")
+    if "://" not in url:
+        scheme = "https" if url.endswith(":443") else "http"
+        url = f"{scheme}://{url}"
+    return url
+
+
 def fetch_assignments(url: str, token: str, entry_id: str | None) -> dict[str, Any]:
     body = json.dumps({"config_entry_id": entry_id} if entry_id else {}).encode()
     request = urllib.request.Request(
-        f"{url.rstrip('/')}/api/services/hap_bridge/room_assignments?return_response",
+        f"{normalize_url(url)}/api/services/hap_bridge/room_assignments?return_response",
         data=body,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
