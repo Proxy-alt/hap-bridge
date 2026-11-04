@@ -172,6 +172,7 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             get_source=self._async_source,
             ffmpeg=get_ffmpeg_manager(self.hass).binary,
             audio=self.audio,
+            prebuffer=self.spec.camera_prebuffer,
             load=lambda: settings.get(key),
             save=lambda state: settings.set(key, state),
         )
@@ -193,6 +194,11 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             return None
 
     async def async_get_snapshot(self, image_size: dict[str, int]) -> bytes:
+        if self.recording is not None and not self.recording.snapshot_allowed(
+            image_size.get("reason")
+        ):
+            # Turned off in the Home app (camera off, or that kind of snapshot).
+            raise PermissionError("snapshots are turned off in the Home app")
         image = await ha_camera.async_get_image(
             self.hass,
             self.entity_id,

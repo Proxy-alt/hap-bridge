@@ -16,6 +16,7 @@ import hashlib
 import inspect
 import logging
 import socket
+import uuid
 from typing import Any
 
 from pyhap import const as hap_const
@@ -35,7 +36,7 @@ from homeassistant.helpers.storage import STORAGE_DIR, Store
 from . import issues, pairing
 from .accessories import SpecAccessory, diagnose
 from .adaptive import CHARACTERISTICS as ADAPTIVE_CHARACTERISTICS, AdaptiveLighting
-from .api import AccessorySpec, CharSpec, Settings
+from .api import AccessorySpec, CharSpec, ServiceSpec, Settings
 from .const import BRIDGE_AID, DOMAIN, MAX_BRIDGED_ACCESSORIES, STORAGE_VERSION
 from . import recording
 from .ids import IdRegistry, StableIIDManager
@@ -251,6 +252,10 @@ class HapBridge:
                 unit.running = False
         self.units.clear()
         self._bindings.clear()
+        if self._settings.data:
+            # Saves are delayed a second; don't lose a change made just before
+            # a reload (a name set in the Home app, a TV input renamed).
+            await self._settings_store.async_save(self._settings.data)
 
     # -- pairing --------------------------------------------------------------------------
 
@@ -284,6 +289,39 @@ class HapBridge:
         self._async_show_pairing(unit)
         _LOGGER.info("Removed all pairings from %s", unit.name)
 
+    def pairings(self) -> list[dict[str, Any]]:
+        """Each unit's paired controllers (one per Apple ID / home hub key)."""
+        return [
+            {
+                "unit": unit.name,
+                "unit_id": unit.id,
+                "controllers": [
+                    {"id": str(client), "admin": unit.driver.state.is_admin(client)}
+                    for client in unit.driver.state.paired_clients
+                ],
+            }
+            for unit in self.units.values()
+        ]
+
+    def async_remove_pairing(self, pairing_id: str) -> bool:
+        """Forget one controller, on whichever unit it's paired with."""
+        try:
+            client = uuid.UUID(pairing_id)
+        except ValueError:
+            return False
+        for unit in self.units.values():
+            state = unit.driver.state
+            if client not in state.paired_clients:
+                continue
+            state.remove_paired_client(client)
+            unit.driver.async_persist()
+            unit.driver.async_update_advertisement()
+            if not state.paired:
+                self._async_show_pairing(unit)
+            _LOGGER.info("Removed controller %s from %s", client, unit.name)
+            return True
+        return False
+
     # -- diagnostics -----------------------------------------------------------------------
 
     def diagnostics(self) -> dict[str, Any]:
@@ -299,6 +337,10 @@ class HapBridge:
                     "standalone": unit.standalone,
                     "port": unit.driver.state.port,
                     "paired_clients": len(unit.driver.state.paired_clients),
+                    "pairings": [
+                        {"id": str(c), "admin": unit.driver.state.is_admin(c)}
+                        for c in unit.driver.state.paired_clients
+                    ],
                     "config_version": unit.driver.state.config_version,
                 }
                 for unit in self.units.values()
@@ -329,6 +371,14 @@ class HapBridge:
             acc = SpecAccessory(spec, driver, spec.name, aid=aid, iid_manager=iid_manager)
         acc.category = _category(spec.category)
         acc.set_info_service(**{k: str(v) for k, v in spec.info.items() if v})
+        if (identify := spec.identify) is not None:
+            acc.get_service("AccessoryInformation").configure_char(
+                "Identify",
+                setter_callback=self._setter(
+                    f"{spec.name}: identify", lambda value: identify() if value else None,
+                    lambda: None,
+                ),
+            )
 
         built: dict[int, Service] = {}
         for svc_spec in spec.services:
@@ -376,6 +426,11 @@ class HapBridge:
                         f"{spec.name}: writing {name}", char_spec.set, refresh
                     ),
                 )
+                if (svc_spec.type_name, name) in _TIMED_WRITES:
+                    # Controllers then use timed writes, which can't be replayed.
+                    perms = char.properties["Permissions"]
+                    if "tw" not in perms:
+                        char.properties["Permissions"] = [*perms, "tw"]
                 bound.append((char, char_spec))
                 self._push(char, char_spec)
                 for entity_id in char_spec.watch:
@@ -387,10 +442,58 @@ class HapBridge:
                 acc.set_primary_service(service)
             for linked in svc_spec.linked:
                 service.add_linked_service(built[id(linked)])
+        self._add_configured_names(spec, acc, built)
         if spec.camera is not None and spec.recording is not None:
             # After the spec's services: recording links the Motion Sensor.
             acc.setup_recording(self._settings)  # type: ignore[attr-defined]
         return acc
+
+    def _add_configured_names(
+        self, spec: AccessorySpec, acc: Accessory, built: dict[int, Service]
+    ) -> None:
+        """Give each tile of a multi-tile accessory (a power strip's outlets, a
+        light with a night light) a name, and keep names set in the Home app.
+
+        Without ConfiguredName the Home app shows "<Accessory> 1", "<Accessory> 2".
+        With it, renaming a tile in the Home app writes the name here, so it
+        survives restarts and is visible in diagnostics.
+        """
+        linked = {id(other) for svc in spec.services for other in svc.linked}
+        tiles = [
+            svc for svc in spec.services
+            if svc.type_name in _TILE_SERVICES and id(svc) not in linked
+            and "Name" not in svc.chars and "ConfiguredName" not in svc.chars
+        ]
+        if len(tiles) < 2:
+            return
+        for svc_spec in tiles:
+            service = built[id(svc_spec)]
+            key = f"name:{spec.key}|{svc_spec.type_name}|{svc_spec.unique_id or ''}"
+            default = self._tile_name(spec, svc_spec)
+            name = self._settings.get(key) or default
+            for char_name, value in (("Name", default), ("ConfiguredName", name)):
+                try:
+                    char = service.get_characteristic(char_name)
+                except ValueError:
+                    char = acc.driver.loader.get_char(char_name)
+                    service.add_characteristic(char)
+                    char.broker = acc
+                    acc.iid_manager.assign(char)
+                char.set_value(value, should_notify=False)
+
+            def _renamed(value: Any, key: str = key) -> None:
+                self._settings.set(key, str(value))
+
+            service.get_characteristic("ConfiguredName").setter_callback = _renamed
+
+    def _tile_name(self, spec: AccessorySpec, svc_spec: ServiceSpec) -> str:
+        """The watched entity's name, without the device name in front."""
+        watched = svc_spec.watched()
+        state = self.hass.states.get(watched[0]) if watched else None
+        name = str(state.attributes.get("friendly_name") or "") if state else ""
+        if name.lower().startswith(spec.name.lower()) and len(name) > len(spec.name):
+            name = name[len(spec.name):].strip(" -:")
+        return name or svc_spec.type_name
 
     def _save_adaptive(self, key: str, transition: dict[str, Any] | None) -> None:
         if transition is None:
@@ -470,6 +573,24 @@ class _Driver(AccessoryDriver):
         if success:
             self._on_paired()
         return success
+
+
+# Writes that should be timed (HAP's "tw"): opening a lock, a garage door or
+# disarming an alarm.
+_TIMED_WRITES = {
+    ("LockMechanism", "LockTargetState"),
+    ("GarageDoorOpener", "TargetDoorState"),
+    ("SecuritySystem", "SecuritySystemTargetState"),
+}
+
+# Services the Home app shows as their own tile on a multi-service accessory.
+_TILE_SERVICES = {
+    "Lightbulb", "Switch", "Outlet", "Fanv2", "Fan", "Valve", "LockMechanism",
+    "WindowCovering", "Door", "Window", "GarageDoorOpener", "StatelessProgrammableSwitch",
+    "AirQualitySensor", "CarbonDioxideSensor", "CarbonMonoxideSensor", "ContactSensor",
+    "HumiditySensor", "LeakSensor", "LightSensor", "MotionSensor", "OccupancySensor",
+    "SmokeSensor", "TemperatureSensor",
+}
 
 
 def _port_free(port: int) -> bool:

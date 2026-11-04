@@ -17,6 +17,10 @@ EXTRA_CHARACTERISTICS: dict[str, set[str]] = {
 }
 
 
+# Services the camera accessory completes itself (see recording.py).
+_MANAGED = {"CameraRecordingManagement", "CameraOperatingMode", "DataStreamTransportManagement"}
+
+
 def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str]]:
     """Return (errors, warnings). Accessories with errors are not exposed."""
     errors: list[str] = []
@@ -63,7 +67,9 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
             if char.get is not None and not char.watch:
                 warnings.append(f"{svc.type_name}.{name} has a getter but watches nothing")
 
-        for name in required:
+        # The bridge fills in HomeKit Secure Video's own characteristics.
+        managed = svc.type_name in _MANAGED and spec.camera is not None
+        for name in () if managed else required:
             if name != "Name" and (name not in svc.chars or svc.chars[name].get is None):
                 warnings.append(f"{svc.type_name}.{name} is required but never set")
 

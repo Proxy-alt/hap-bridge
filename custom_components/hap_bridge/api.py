@@ -197,6 +197,10 @@ class AccessorySpec:
         self.camera_audio = False
         # HomeKit Secure Video triggers; None means the camera can't record.
         self.recording: Recording | None = None
+        # Keep ffmpeg running so recordings start before their trigger.
+        self.camera_prebuffer = True
+        # Called when the Home app's "Identify Accessory" is tapped.
+        self.identify: Callable[[], Any] | None = None
         # The name the profile gave, when the options flow renamed it.
         self.default_name = name
         # Which step built it, e.g. "integration:acme", "profile:air_purifier",

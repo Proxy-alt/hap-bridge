@@ -37,6 +37,7 @@ from ..const import (
     CONF_INCLUDE_DOMAINS,
     CONF_INCLUDE_INTEGRATIONS,
     CONF_NAMES,
+    CONF_NO_PREBUFFER,
     DOMAIN,
     PLATFORM,
 )
@@ -138,11 +139,14 @@ def apply_options(options: Mapping[str, Any], specs: list[AccessorySpec]) -> Non
     """Names and camera audio chosen in the options flow."""
     names = options.get(CONF_NAMES) or {}
     audio = set(options.get(CONF_CAMERA_AUDIO) or ())
+    no_prebuffer = set(options.get(CONF_NO_PREBUFFER) or ())
     for spec in specs:
         if name := names.get(spec.key):
             spec.name = name
         if spec.camera is not None and spec.camera in audio:
             spec.camera_audio = True
+        if spec.camera is not None and spec.camera in no_prebuffer:
+            spec.camera_prebuffer = False
 
 
 async def _async_run_shim(ctx: HapContext, shims: list[Shim], result: Collection) -> None:

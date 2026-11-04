@@ -374,3 +374,103 @@ def test_session_keys_are_kept():
     recording.capture_session_keys()
     crypto = hap_protocol.HAPCrypto(b"z" * 32)
     assert crypto.shared_key == b"z" * 32
+
+
+# -- prebuffer ------------------------------------------------------------------------------
+
+
+@run
+async def test_prebuffer_keeps_the_last_fragments_and_follows_live():
+    feed: asyncio.Queue = asyncio.Queue()
+
+    async def source():
+        while (item := await feed.get()) is not None:
+            yield item
+
+    prebuffer = recording.Prebuffer(source, keep_fragments=2, name="cam")
+    prebuffer.start()
+    for item in [(True, b"init"), (False, b"f1"), (False, b"f2"), (False, b"f3")]:
+        feed.put_nowait(item)
+    await asyncio.sleep(0.01)
+    assert prebuffer.init == b"init" and prebuffer.fragments == [b"f2", b"f3"]
+
+    clip = prebuffer.clip()
+    got = [await anext(clip) for _ in range(3)]
+    assert got == [(True, b"init"), (False, b"f2"), (False, b"f3")]
+    feed.put_nowait((False, b"f4"))
+    assert await anext(clip) == (False, b"f4")
+
+    # ffmpeg restarting means a new init segment: the clip can't continue.
+    feed.put_nowait((True, b"init2"))
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(clip), 1)
+    await prebuffer.async_stop()
+    assert not prebuffer.running and prebuffer.init is None
+
+
+@run
+async def test_prebuffer_restarts_ffmpeg_with_backoff(monkeypatch):
+    runs = []
+    monkeypatch.setattr(recording, "RESTART_DELAYS", (0.01,))
+
+    async def source():
+        runs.append(1)
+        yield True, b"init"
+        raise RuntimeError("ffmpeg died")
+
+    prebuffer = recording.Prebuffer(source, keep_fragments=1, name="cam")
+    prebuffer.start()
+    await asyncio.sleep(0.1)
+    await prebuffer.async_stop()
+    assert len(runs) >= 3
+
+
+@run
+async def test_clips_come_from_the_prebuffer_while_recording_is_on():
+    manager, _ = _manager()
+    manager.server.port = 40000
+    starts = []
+
+    async def ffmpeg(config, audio):
+        starts.append(audio)
+        yield True, b"init"
+        for n in range(3):
+            yield False, b"pre%d" % n
+        await asyncio.Event().wait()  # keep running
+
+    manager._async_ffmpeg_segments = ffmpeg
+    rec = manager.recording_service
+    rec.get_characteristic("SelectedCameraRecordingConfiguration").client_update_value(_selected())
+    assert manager.prebuffer is None  # recording not on yet
+    rec.get_characteristic("Active").client_update_value(1)
+    assert manager.prebuffer is not None
+    await asyncio.sleep(0.01)
+    assert manager.prebuffer.fragments == [b"pre2"]  # 4 s prebuffer = one 4 s fragment
+
+    clip = manager._async_segments(manager.config)
+    assert [await anext(clip), await anext(clip)] == [(True, b"init"), (False, b"pre2")]
+    await clip.aclose()
+
+    # Turning recording off stops it; with the prebuffer off, clips start ffmpeg.
+    rec.get_characteristic("Active").client_update_value(0)
+    assert manager.prebuffer is None
+    assert starts == [False]
+    await asyncio.sleep(0)
+
+
+def test_snapshots_follow_the_home_app_settings():
+    manager, _ = _manager()
+    assert manager.snapshot_allowed(0) and manager.snapshot_allowed(1)
+    manager.mode_service.get_characteristic("PeriodicSnapshotsActive").client_update_value(0)
+    assert not manager.snapshot_allowed(0) and manager.snapshot_allowed(1)
+    manager.mode_service.get_characteristic("HomeKitCameraActive").client_update_value(0)
+    assert not manager.snapshot_allowed(1) and not manager.snapshot_allowed(None)
+
+
+def test_profile_built_operating_mode_is_reused():
+    acc = _camera_accessory()
+    mode = acc.add_preload_service("CameraOperatingMode", chars=["NightVision"])
+    manager, _ = _manager(acc)
+    assert manager.mode_service is mode
+    assert mode.get_characteristic("HomeKitCameraActive").value == 1
+    assert [s.display_name for s in acc.services].count("CameraOperatingMode") == 1

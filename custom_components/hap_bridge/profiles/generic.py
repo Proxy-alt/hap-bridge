@@ -164,7 +164,15 @@ def camera(ctx: HapContext) -> None:
         return
     bell = ctx.entity("event", device_class="doorbell")
     motion = ctx.entity("binary_sensor", device_class="motion")
-    cameras.describe_camera(ctx, cameras_[0], doorbell=bell, motion=motion)
+    # Night vision etc. only show in Home with HomeKit Secure Video; without
+    # it (no motion sensor or doorbell) the switches stay ordinary switches.
+    settings = cameras.camera_settings(ctx)
+    acc = cameras.describe_camera(ctx, cameras_[0], doorbell=bell, motion=motion, **settings)
+    if acc.recording is None:
+        settings = {}
+    for eid in settings.values():
+        if eid:
+            ctx.claim(eid)
     for eid in cameras_[1:]:  # e.g. a second lens: its own accessory
         cameras.describe_camera(ctx, eid, name=ctx.name_of(eid))
 
@@ -326,6 +334,18 @@ def _has_color_temp(ctx: HapContext, entity_id: str) -> bool:
     return "color_temp" in ((ent.capabilities or {}).get("supported_color_modes") or [])
 
 
-FINISHERS: list[Profile] = [device_status, adaptive_lighting]
+def identify(ctx: HapContext) -> None:
+    """The Home app's "Identify Accessory" presses the device's identify button
+    (which blinks or beeps it)."""
+    button = ctx.entity("button", device_class="identify")
+    if button is None or not ctx.accessories:
+        return
+    ctx.claim(button)
+    for acc in ctx.accessories:
+        if acc.identify is None:
+            acc.identify = lambda: ctx.call("button", "press", button)
+
+
+FINISHERS: list[Profile] = [device_status, adaptive_lighting, identify]
 
 BY_INTEGRATION: dict[str, list[Profile]] = {}

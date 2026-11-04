@@ -251,6 +251,9 @@ class Blocks:
         motion: str | None = None,
         audio: bool = False,
         recording: dict[str, Any] | bool | None = None,
+        night_vision: str | None = None,
+        status_light: str | None = None,
+        privacy: str | None = None,
     ) -> AccessorySpec:
         """A standalone camera (live video, snapshots); a video doorbell with `doorbell`.
 
@@ -258,18 +261,23 @@ class Blocks:
         `recording` picks what starts a HomeKit Secure Video recording, e.g.
         `{"motion": ["binary_sensor.person", "binary_sensor.vehicle"],
         "doorbell": "event.ring"}`; by default `motion` and `doorbell`, and
-        `False` turns it off.
+        `False` turns it off. `night_vision`, `status_light` and `privacy`
+        (switches) appear in the camera's settings in the Home app.
         """
         self._entry(camera, "camera")
         if doorbell is not None:
             self._entry(doorbell, "event")
         if motion is not None:
             self._entry(motion, "binary_sensor")
+        for eid in (night_vision, status_light, privacy):
+            if eid is not None:
+                self._entry(eid, "switch")
         if isinstance(recording, dict):
             moving = recording.get("motion") or ()
             for eid in [moving] if isinstance(moving, str) else moving:
                 self._entry(eid, "binary_sensor")
         return cameras.describe_camera(
             self._ctx, camera, doorbell=doorbell, motion=motion, audio=audio,
-            recording=recording,
+            recording=recording, night_vision=night_vision, status_light=status_light,
+            privacy=privacy,
         )

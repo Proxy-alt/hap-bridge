@@ -11,8 +11,10 @@ a fragment every few seconds until the hub has enough and closes it.
 The hub runs its own analysis on the clips (people, animals, vehicles,
 packages). Accessories can't tell it what's in them, only what starts them.
 
-There's no prebuffer yet: ffmpeg starts when the hub asks, so a clip begins a
-second or two after the trigger instead of a few seconds before it.
+While recording is on in the Home app, ffmpeg runs all the time and the last
+few seconds are kept (the prebuffer), so a clip starts before the trigger.
+That costs a constant ffmpeg per camera; with the prebuffer turned off, ffmpeg
+starts when the hub asks and the clip begins a second or two after the trigger.
 
 Apple doesn't publish this. It follows HAP-NodeJS's reverse-engineered
 RecordingManagement. Nothing here depends on Home Assistant.
@@ -32,6 +34,7 @@ from typing import Any
 
 from pyhap import hap_protocol, tlv as pyhap_tlv
 from pyhap.hap_crypto import HAPCrypto
+from pyhap.loader import get_loader
 
 from . import hds
 
@@ -51,7 +54,11 @@ CHARACTERISTICS = {
     "PeriodicSnapshotsActive": ("225", "uint8", ["pr", "pw", "ev"]),
     "SupportedDataStreamTransportConfiguration": ("130", "tlv8", ["pr"]),
     "SetupDataStreamTransport": ("131", "tlv8", ["pr", "pw", "wr"]),
+    "CameraOperatingModeIndicator": ("21D", "uint8", ["pr", "pw", "ev"]),
+    "ManuallyDisabled": ("227", "uint8", ["pr", "ev"]),
 }
+# The camera settings the Home app shows, which profiles may bind.
+OPERATING_MODE_OPTIONAL = ["NightVision", "CameraOperatingModeIndicator", "ManuallyDisabled"]
 SERVICES = {
     "CameraRecordingManagement": ("204", [
         "Active", "SupportedCameraRecordingConfiguration",
@@ -60,11 +67,14 @@ SERVICES = {
     ]),
     "CameraOperatingMode": ("21A", [
         "EventSnapshotsActive", "HomeKitCameraActive", "PeriodicSnapshotsActive",
-    ]),
+    ], OPERATING_MODE_OPTIONAL),
     "DataStreamTransportManagement": ("129", [
         "SetupDataStreamTransport", "SupportedDataStreamTransportConfiguration", "Version",
     ]),
 }
+# Characteristics the bridge itself sets (not the profile).
+MANAGED_SERVICES = {"CameraRecordingManagement", "CameraOperatingMode",
+                    "DataStreamTransportManagement"}
 
 
 def register_definitions(loader: Any) -> None:
@@ -74,15 +84,20 @@ def register_definitions(loader: Any) -> None:
         if fmt == "uint8":
             entry.update(minValue=0, maxValue=1)
         loader.char_types.setdefault(name, entry)
-    for name, (short, chars) in SERVICES.items():
+    for name, (short, chars, *optional) in SERVICES.items():
         loader.serv_types.setdefault(
             name,
-            {"UUID": _uuid(short), "RequiredCharacteristics": chars, "OptionalCharacteristics": []},
+            {"UUID": _uuid(short), "RequiredCharacteristics": chars,
+             "OptionalCharacteristics": optional[0] if optional else []},
         )
 
 
 def _uuid(short: str) -> str:
     return f"{short.rjust(8, '0')}{_BASE}"
+
+
+# Profiles, validation and previews use the shared catalogue.
+register_definitions(get_loader())
 
 
 # -- session keys --------------------------------------------------------------------
@@ -298,6 +313,94 @@ async def mp4_segments(reader: asyncio.StreamReader) -> AsyncIterator[tuple[bool
             pending.clear()
 
 
+# -- prebuffer -------------------------------------------------------------------------
+
+SegmentSource = Callable[[], AsyncIterator[tuple[bool, bytes]]]
+RESTART_DELAYS = (5.0, 15.0, 30.0, 60.0)
+
+
+class Prebuffer:
+    """Keeps one ffmpeg running and the last few fragments, for clips that
+    start before their trigger. Clips also follow it live from there."""
+
+    def __init__(self, source: SegmentSource, keep_fragments: int, name: str) -> None:
+        self._source = source
+        self._keep = max(keep_fragments, 1)
+        self._name = name
+        self.init: bytes | None = None
+        self.fragments: list[bytes] = []
+        self._listeners: set[asyncio.Queue[tuple[bool, bytes] | None]] = set()
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        if not self.running:
+            self._task = asyncio.get_running_loop().create_task(self._async_run())
+
+    async def async_stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        self._reset()
+
+    def _reset(self) -> None:
+        self.init = None
+        self.fragments.clear()
+        for queue in self._listeners:
+            queue.put_nowait(None)  # the clip can't continue on a new init segment
+        self._listeners.clear()
+
+    async def _async_run(self) -> None:
+        failures = 0
+        while True:
+            started = asyncio.get_running_loop().time()
+            try:
+                async for is_init, data in self._source():
+                    if is_init:
+                        self._reset()
+                        self.init = data
+                        continue
+                    self.fragments = [*self.fragments, data][-self._keep:]
+                    for queue in list(self._listeners):
+                        if queue.qsize() > 30:  # that clip stopped reading
+                            self._listeners.discard(queue)
+                            queue.put_nowait(None)
+                        else:
+                            queue.put_nowait((False, data))
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - retried below
+                _LOGGER.warning("%s: prebuffer ffmpeg failed: %s", self._name, err)
+            self._reset()
+            # Ran for a while: a hiccup. Died at once: back off.
+            failures = 0 if asyncio.get_running_loop().time() - started > 60 else failures + 1
+            delay = RESTART_DELAYS[min(failures, len(RESTART_DELAYS) - 1)]
+            _LOGGER.debug("%s: prebuffer restarting in %ss", self._name, delay)
+            await asyncio.sleep(delay)
+
+    async def clip(self) -> AsyncIterator[tuple[bool, bytes]]:
+        """The init segment, the kept fragments, then new ones as they come."""
+        if self.init is None:
+            return
+        queue: asyncio.Queue[tuple[bool, bytes] | None] = asyncio.Queue()
+        self._listeners.add(queue)
+        try:
+            yield True, self.init
+            for fragment in list(self.fragments):
+                yield False, fragment
+            while (item := await queue.get()) is not None:
+                yield item
+        finally:
+            self._listeners.discard(queue)
+
+
 # -- the services and the stream -----------------------------------------------------
 
 CHUNK = 0x40000  # largest piece of a segment per dataSend/data event
@@ -329,6 +432,7 @@ class RecordingManager:
         get_source: Callable[[], Awaitable[str | None]],
         ffmpeg: str,
         audio: bool,
+        prebuffer: bool = True,
         load: Callable[[], dict[str, Any] | None],
         save: Callable[[dict[str, Any]], None],
     ) -> None:
@@ -339,6 +443,9 @@ class RecordingManager:
         self._get_source = get_source
         self._ffmpeg = ffmpeg
         self.camera_audio = audio
+        self._prebuffer_wanted = prebuffer
+        self.prebuffer: Prebuffer | None = None
+        self._prebuffer_key: tuple[Any, ...] | None = None
         self._save = save
         self.server = hds.DataStreamServer()
         self.server.on_request("dataSend", "open", self._async_open)
@@ -381,6 +488,10 @@ class RecordingManager:
     # building
 
     def _add(self, name: str, unique_id: Any = None) -> Any:
+        # A profile may have built it already (e.g. CameraOperatingMode with
+        # night vision); the bridge then fills in what it manages.
+        if (existing := self.acc.get_service(name)) is not None:
+            return existing
         service = self.acc.driver.loader.get_service(name)
         if unique_id is not None:
             service.unique_id = unique_id
@@ -417,7 +528,7 @@ class RecordingManager:
         rec.configure_char("SelectedCameraRecordingConfiguration", value=self.state["selected"],
                            setter_callback=self._on_selected)
         rec.configure_char("RecordingAudioActive", value=self.state["audio"],
-                           setter_callback=self._setting("audio"))
+                           setter_callback=self._setting("audio", self._on_audio))
 
         mode = self._add("CameraOperatingMode")
         mode.configure_char("HomeKitCameraActive", value=self.state["camera_active"],
@@ -459,17 +570,33 @@ class RecordingManager:
     def streaming_allowed(self) -> bool:
         return bool(self.state["camera_active"]) and bool(self.state["streaming"])
 
+    def snapshot_allowed(self, reason: int | None) -> bool:
+        """Whether the Home app's settings allow a snapshot. HAP says why it
+        wants one: 0 for the tile's periodic refresh, 1 for a notification."""
+        if not self.state["camera_active"]:
+            return False
+        if reason == 0:
+            return bool(self.state["periodic_snapshots"])
+        if reason == 1:
+            return bool(self.state["event_snapshots"])
+        return True
+
     # characteristic writes
 
     def _on_active(self, active: int) -> None:
         if not active:
             self._cancel_stream()
+        self._update_prebuffer()
+
+    def _on_audio(self, _active: int) -> None:
+        self._update_prebuffer()
 
     def _on_camera_active(self, active: int) -> None:
         if self._motion_status is not None:
             self._motion_status.set_value(bool(active))
         if not active:
             self._cancel_stream()
+        self._update_prebuffer()
 
     def _on_selected(self, value: str) -> None:
         try:
@@ -479,6 +606,7 @@ class RecordingManager:
             raise
         self.state["selected"] = value
         self._persist()
+        self._update_prebuffer()
         _LOGGER.debug("%s: recording configuration %s", self.name, self.config)
 
     def _on_setup_transport(self, value: str) -> str:
@@ -505,9 +633,13 @@ class RecordingManager:
 
     async def async_start(self, host: str | None = None) -> None:
         await self.server.async_start(host)
+        self._update_prebuffer()
 
     async def async_stop(self) -> None:
         self._cancel_stream()
+        if self.prebuffer is not None:
+            await self.prebuffer.async_stop()
+            self.prebuffer = None
         await self.server.async_stop()
 
     # the stream
@@ -551,12 +683,50 @@ class RecordingManager:
         if self._stream is not None and not self._stream.done():
             self._stream.cancel()
 
+    def _recording_audio(self) -> bool:
+        return self.camera_audio and bool(self.state["audio"])
+
+    def _update_prebuffer(self) -> None:
+        """Run the prebuffer while recording could be asked for, with the
+        configuration the hub chose; stop it otherwise."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # not started yet; async_start calls this again
+        wanted = (self._prebuffer_wanted and self.server.port is not None
+                  and bool(self.state["active"]) and bool(self.state["camera_active"])
+                  and self.config is not None)
+        key = (self.config, self._recording_audio()) if wanted else None
+        if key == self._prebuffer_key:
+            return
+        old, self.prebuffer, self._prebuffer_key = self.prebuffer, None, key
+        if old is not None:
+            loop.create_task(old.async_stop())
+        if key is None:
+            return
+        config, audio = key
+        keep = -(-max(config.prebuffer_ms, PREBUFFER_MS) // max(config.fragment_ms, 1000))
+        self.prebuffer = Prebuffer(
+            lambda: self._async_ffmpeg_segments(config, audio), keep, self.name)
+        self.prebuffer.start()
+
     async def _async_segments(self, config: RecordingConfig) -> AsyncIterator[tuple[bool, bytes]]:
+        prebuffer = self.prebuffer
+        if (prebuffer is not None and prebuffer.init is not None
+                and self._prebuffer_key == (config, self._recording_audio())):
+            async for segment in prebuffer.clip():
+                yield segment
+            return
+        async for segment in self._async_ffmpeg_segments(config, self._recording_audio()):
+            yield segment
+
+    async def _async_ffmpeg_segments(
+        self, config: RecordingConfig, audio: bool
+    ) -> AsyncIterator[tuple[bool, bytes]]:
         source = await self._get_source()
         if not source:
             raise RuntimeError("camera has no stream source")
-        command = ffmpeg_command(self._ffmpeg, source, config,
-                                 audio=self.camera_audio and bool(self.state["audio"]))
+        command = ffmpeg_command(self._ffmpeg, source, config, audio=audio)
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

@@ -10,6 +10,8 @@ CONF_EXCLUDE_ENTITIES = "exclude_entities"
 CONF_NAMES = "names"
 # Camera entities whose stream's audio goes to HomeKit too.
 CONF_CAMERA_AUDIO = "camera_audio"
+# Camera entities that record (HomeKit Secure Video) without a prebuffer.
+CONF_NO_PREBUFFER = "camera_no_prebuffer"
 
 DEFAULT_NAME = "HAP Bridge"
 DEFAULT_PORT = 21070

@@ -10,3 +10,21 @@ preview:
       selector:
         config_entry:
           integration: hap_bridge
+
+list_pairings:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: hap_bridge
+
+remove_pairing:
+  fields:
+    pairing_id:
+      required: true
+      selector:
+        text:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: hap_bridge

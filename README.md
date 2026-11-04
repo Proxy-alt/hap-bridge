@@ -51,7 +51,8 @@ For each device, in order, each step seeing only what earlier steps left:
    - valves, and water heaters as heat-only thermostats
    - vacuums and lawn mowers as switches: on starts, off sends them home
    - scenes and buttons as switches that turn themselves back off; scripts
-     as switches. Restart, update and identify buttons are left out.
+     as switches. Restart and update buttons are left out; an identify
+     button runs when you tap **Identify Accessory** in the Home app.
    - selects and input selects as one switch per option
    - doorbell and button `event` entities
 4. **Finishers** that add to what's been built: a battery level sensor adds a
@@ -305,8 +306,14 @@ Turn it on in the camera's settings in the Home app. You need a home hub
   seconds after the triggers clear, or after 5 minutes.
 - The hub analyses the clips itself, for people, animals, vehicles and
   packages. A camera can't tell it what it saw, only what starts a recording.
-- There's no prebuffer yet. ffmpeg starts when the hub asks for the clip, so
-  it begins a second or two after the trigger, not a few seconds before.
+- While recording is on in the Home app, ffmpeg keeps running and holds the
+  last few seconds, so a clip starts 4–8 seconds before its trigger. That
+  costs one ffmpeg per recording camera, running all the time. On a slow
+  machine, pick cameras under **Cameras → Cameras that record without a
+  prebuffer** in the options. Their ffmpeg starts when the hub asks, and the
+  clip begins a second or two after the trigger.
+- If the Home app turns the camera off, or turns off its periodic or event
+  snapshots, those requests are refused, not just hidden.
 - The protocol isn't published by Apple. This follows HAP-NodeJS's
   reverse-engineered `RecordingManagement` and `DataStreamServer`; see
   `recording.py` and `hds.py`.
@@ -334,6 +341,14 @@ ctx.blocks.camera(
   recorded.
 - `recording=False` turns HomeKit Secure Video off for that camera. The
   preview shows each camera's triggers.
+
+The camera's settings in the Home app can also show **Night Vision** and
+**Status Light**, and show the camera as manually turned off while a privacy
+switch is on. The bundled profile finds these switches by their translation
+keys: `ir_lights`, `infrared`, `night_vision` and similar; `status_light` and
+`status_led`; `privacy_mode`. A profile can pass them as
+`night_vision=`, `status_light=` and `privacy=`. They're part of the
+recording service, so they only appear on cameras that can record.
 
 ## Adaptive Lighting
 
@@ -394,7 +409,8 @@ The options have three parts:
   when the accessory is first added; after that the Home app keeps its own,
   so rename accessories you've already added there. The preview shows the
   original as `default_name`.
-- **Camera audio:** which cameras send sound (see above).
+- **Cameras:** which cameras send sound, and which record without a
+  prebuffer (see above).
 
 Adding, removing or renaming devices and entities in Home Assistant rebuilds
 the bridge after 30 seconds of quiet.
@@ -405,6 +421,21 @@ primary service watches are unavailable. A profile can change that rule with
 
 Download diagnostics on the integration to see each accessory as HomeKit sees it:
 AIDs, services, IIDs, values and the entities it watches.
+
+**Paired controllers:** the `hap_bridge.list_pairings` action lists the
+controllers paired with the bridge and with each TV and camera, and which
+are admins. `hap_bridge.remove_pairing` removes one, for example a phone you
+no longer have, without resetting everything. When the last one goes, the
+pairing code shows again.
+
+**Other details:**
+
+- **Tile names:** when one accessory has several tiles (a power strip's
+  outlets, a fan's light), each gets its entity's name, without the device
+  name in front, rather than "Strip 1", "Strip 2". Renaming a tile in the
+  Home app is remembered across restarts.
+- **Timed writes:** unlocking a lock, opening a garage door and changing an
+  alarm's mode use HAP timed writes, which can't be replayed.
 
 ## Development
 
@@ -429,7 +460,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 - **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
-- **Cameras have no talk-back, and HomeKit Secure Video has no prebuffer.** Clips start a second or two after the trigger. The recording protocol hasn't been tried with a real home hub yet.
+- **Cameras have no talk-back.** HomeKit Secure Video hasn't been tried with a real home hub yet.
 - **Plain speakers aren't exposed.** HomeKit has no useful service for them (only AirPlay speakers show up properly).
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
 - **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.

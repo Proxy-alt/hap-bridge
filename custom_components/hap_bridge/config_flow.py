@@ -19,6 +19,7 @@ from .const import (
     CONF_INCLUDE_DOMAINS,
     CONF_INCLUDE_INTEGRATIONS,
     CONF_NAMES,
+    CONF_NO_PREBUFFER,
     DEFAULT_NAME,
     DEFAULT_PORT,
     DOMAIN,
@@ -178,15 +179,20 @@ class HapBridgeOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            return self._save(**{CONF_CAMERA_AUDIO: user_input.get(CONF_CAMERA_AUDIO, [])})
+            return self._save(**{
+                CONF_CAMERA_AUDIO: user_input.get(CONF_CAMERA_AUDIO, []),
+                CONF_NO_PREBUFFER: user_input.get(CONF_NO_PREBUFFER, []),
+            })
+        options = self.config_entry.options
+        cameras = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="camera", multiple=True)
+        )
         return self.async_show_form(
             step_id="camera_audio",
             data_schema=vol.Schema({
-                vol.Optional(
-                    CONF_CAMERA_AUDIO,
-                    default=self.config_entry.options.get(CONF_CAMERA_AUDIO, []),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="camera", multiple=True)
-                ),
+                vol.Optional(CONF_CAMERA_AUDIO, default=options.get(CONF_CAMERA_AUDIO, [])):
+                    cameras,
+                vol.Optional(CONF_NO_PREBUFFER, default=options.get(CONF_NO_PREBUFFER, [])):
+                    cameras,
             }),
         )

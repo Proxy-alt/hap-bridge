@@ -27,8 +27,29 @@ def class_name(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "_", name)
 
 
+def _add_hksv_definitions(loader) -> None:
+    """recording.py's HomeKit Secure Video definitions, which HAP-python lacks.
+
+    Loaded from the file (not imported as a package) so this runs without
+    Home Assistant installed."""
+    import importlib.util
+    import types
+
+    path = TARGET.parent / "recording.py"
+    if "_hap_bridge_gen" not in sys.modules:
+        package = types.ModuleType("_hap_bridge_gen")
+        package.__path__ = [str(TARGET.parent)]
+        sys.modules["_hap_bridge_gen"] = package
+    spec = importlib.util.spec_from_file_location("_hap_bridge_gen.recording", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module.register_definitions(loader)
+
+
 def render() -> str:
     loader = get_loader()
+    _add_hksv_definitions(loader)
     lines = [
         '"""HomeKit service, characteristic and value names, so profiles needn\'t',
         "spell raw HAP strings or remember what 0 and 1 mean.",

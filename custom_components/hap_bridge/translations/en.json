@@ -16,7 +16,7 @@
         "menu_options": {
           "filters": "What to expose",
           "rename": "Rename an accessory",
-          "camera_audio": "Camera audio"
+          "camera_audio": "Cameras"
         }
       },
       "rename": {
@@ -30,9 +30,12 @@
         "data": { "name": "Name in HomeKit" }
       },
       "camera_audio": {
-        "title": "Camera audio",
-        "description": "Send these cameras' sound to the Home app along with the video. Only choose cameras whose stream has audio: for one without, the video won't play either. Talking back through the camera isn't supported.",
-        "data": { "camera_audio": "Cameras with audio" }
+        "title": "Cameras",
+        "description": "Cameras with audio send their sound to the Home app along with the video. Only choose cameras whose stream has audio: for one without, the video won't play either. Talking back through the camera isn't supported.\n\nWhile HomeKit Secure Video is on for a camera, ffmpeg keeps running so recordings start a few seconds before what triggered them. On a slow machine, turn that off for some cameras: their recordings then start a second or two after the trigger.",
+        "data": {
+          "camera_audio": "Cameras with audio",
+          "camera_no_prebuffer": "Cameras that record without a prebuffer"
+        }
       },
       "filters": {
         "title": "What to expose",
@@ -72,6 +75,21 @@
     }
   },
   "services": {
+    "list_pairings": {
+      "name": "List pairings",
+      "description": "Shows the controllers paired with each part of a bridge (the bridge itself, and each TV and camera): one per Apple ID or home hub key, and which are admins.",
+      "fields": {
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: the first)." }
+      }
+    },
+    "remove_pairing": {
+      "name": "Remove pairing",
+      "description": "Forgets one paired controller, e.g. a phone you no longer have. Use List pairings to find its ID. When the last one is removed, the pairing code is shown again.",
+      "fields": {
+        "pairing_id": { "name": "Pairing ID", "description": "The controller's ID, from List pairings." },
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: any)." }
+      }
+    },
     "preview": {
       "name": "Preview",
       "description": "Shows what HomeKit would get for a device or entity: accessories, services, current values, which step built them, validation problems, and what's left out and why. Nothing is paired or changed.",
@@ -83,6 +101,7 @@
     }
   },
   "exceptions": {
-    "no_bridge": { "message": "No HAP Bridge is set up (or that bridge isn't loaded)." }
+    "no_bridge": { "message": "No HAP Bridge is set up (or that bridge isn't loaded)." },
+    "no_pairing": { "message": "No bridge has a controller paired with ID {pairing_id}." }
   }
 }

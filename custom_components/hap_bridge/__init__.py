@@ -83,6 +83,35 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.services.async_register(
         DOMAIN, "preview", _preview, schema=PREVIEW_SCHEMA, supports_response=SupportsResponse.ONLY
     )
+
+    async def _list_pairings(call: ServiceCall) -> ServiceResponse:
+        entry = _preview_entry(hass, call.data.get("config_entry_id"))
+        return {"units": entry.runtime_data.pairings()}
+
+    async def _remove_pairing(call: ServiceCall) -> None:
+        entries = hass.config_entries.async_loaded_entries(DOMAIN)
+        if entry_id := call.data.get("config_entry_id"):
+            entries = [e for e in entries if e.entry_id == entry_id]
+        for entry in entries:
+            if entry.runtime_data.async_remove_pairing(call.data["pairing_id"]):
+                return
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_pairing",
+            translation_placeholders={"pairing_id": call.data["pairing_id"]},
+        )
+
+    hass.services.async_register(
+        DOMAIN, "list_pairings", _list_pairings,
+        schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN, "remove_pairing", _remove_pairing,
+        schema=vol.Schema({
+            vol.Required("pairing_id"): cv.string,
+            vol.Optional("config_entry_id"): cv.string,
+        }),
+    )
     return True
 
 

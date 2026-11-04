@@ -137,6 +137,8 @@ def loader() -> Any:
     if _LOADER is None:
         from pyhap.loader import get_loader
 
+        from . import recording  # noqa: F401 - adds the HomeKit Secure Video definitions
+
         _LOADER = get_loader()
     return _LOADER
 

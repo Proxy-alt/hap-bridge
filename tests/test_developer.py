@@ -278,3 +278,32 @@ async def test_light_without_on_write_gets_a_hint():
     result.assert_valid()
     assert any("can't offer Adaptive Lighting" in w
                for w in sum(result.warnings().values(), []))
+
+
+@run
+async def test_camera_settings_and_identify():
+    hass = testing.FakeHass()
+    hass.states.set("binary_sensor.cam_motion", "off")
+    hass.states.set("switch.cam_ir", "on")
+    hass.states.set("switch.cam_privacy", "off")
+
+    async def profile(ctx):
+        ctx.blocks.camera("camera.cam", motion="binary_sensor.cam_motion",
+                          night_vision="switch.cam_ir", privacy="switch.cam_privacy")
+
+    entries = [testing.entry("camera.cam"), testing.entry("binary_sensor.cam_motion"),
+               testing.entry("switch.cam_ir"), testing.entry("switch.cam_privacy")]
+    result = await testing.async_describe(profile, entries, hass=hass)
+    result.assert_valid()
+    values = result.values(result.accessory())
+    assert values["CameraOperatingMode.NightVision"] is True
+    assert values["CameraOperatingMode.ManuallyDisabled"] == 0
+    await result.async_write(result.accessory(), "CameraOperatingMode", "NightVision", False)
+    assert hass.services.calls[-1] == ("switch", "turn_off", {"entity_id": "switch.cam_ir"})
+
+    # Without anything to trigger recordings there's no operating mode service.
+    async def plain(ctx):
+        ctx.blocks.camera("camera.cam", night_vision="switch.cam_ir")
+
+    result = await testing.async_describe(plain, entries, hass=hass)
+    assert [s.type_name for s in result.accessory().services] == []
