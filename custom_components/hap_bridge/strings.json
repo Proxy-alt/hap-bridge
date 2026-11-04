@@ -75,6 +75,24 @@
     }
   },
   "services": {
+    "accessory_settings": {
+      "name": "Accessory settings",
+      "description": "For an accessory (by its HomeKit serial number), its device's settings (configuration entities) and details (diagnostic entities, firmware, the real serial number), shaped like the Home app's extension settings.",
+      "fields": {
+        "serial": { "name": "Serial number", "description": "The accessory's serial number in HomeKit (HB-...)." },
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: any)." }
+      }
+    },
+    "set_accessory_setting": {
+      "name": "Set accessory setting",
+      "description": "Changes one of the settings Accessory settings lists for an accessory.",
+      "fields": {
+        "serial": { "name": "Serial number", "description": "The accessory's serial number in HomeKit (HB-...)." },
+        "entity_id": { "name": "Setting", "description": "The setting's entity, from Accessory settings." },
+        "value": { "name": "Value", "description": "The new value: on/off, an option, a number or text. Not needed for actions (buttons)." },
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: any)." }
+      }
+    },
     "room_assignments": {
       "name": "Room assignments",
       "description": "Lists each accessory HomeKit gets, by serial number, with the Home Assistant area it belongs in. scripts/assign_rooms.py uses this with HomeClaw to put accessories in the matching Home app rooms.",
@@ -109,6 +127,9 @@
   },
   "exceptions": {
     "no_bridge": { "message": "No HAP Bridge is set up (or that bridge isn't loaded)." },
+    "no_accessory": { "message": "No bridge has an accessory with serial number {serial}." },
+    "not_a_setting": { "message": "{entity_id} isn't one of {name}'s settings." },
+    "setting_needs_value": { "message": "Setting {entity_id} needs a value." },
     "no_pairing": { "message": "No bridge has a controller paired with ID {pairing_id}." }
   }
 }

@@ -294,6 +294,16 @@ class HapBridge:
         self._async_show_pairing(unit)
         _LOGGER.info("Removed all pairings from %s", unit.name)
 
+    @staticmethod
+    def serial_of(acc: Accessory) -> str:
+        return str(acc.get_service("AccessoryInformation").get_characteristic("SerialNumber").value)
+
+    def accessory_by_serial(self, serial: str) -> AccessorySpec | None:
+        """The published accessory with this (HB-...) serial number."""
+        return next(
+            (spec for spec, acc in self._accessories if self.serial_of(acc) == serial), None
+        )
+
     def room_assignments(self) -> dict[str, Any]:
         """Where each published accessory belongs, from Home Assistant areas.
 
@@ -326,8 +336,7 @@ class HapBridge:
                     without.append(spec.name)
                     continue
                 placed.append({
-                    "serial": acc.get_service("AccessoryInformation")
-                    .get_characteristic("SerialNumber").value,
+                    "serial": self.serial_of(acc),
                     "name": spec.name,
                     "room": area.name,
                     "unit": unit.name,

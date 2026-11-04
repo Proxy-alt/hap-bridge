@@ -29,6 +29,7 @@ from homeassistant.helpers.typing import ConfigType
 import voluptuous as vol
 
 from . import issues
+from . import settings
 from .bridge import HapBridge
 from .const import DOMAIN, REGISTRY_RELOAD_COOLDOWN
 from .preview import async_preview
@@ -104,6 +105,35 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         entry = _preview_entry(hass, call.data.get("config_entry_id"))
         return entry.runtime_data.room_assignments()
 
+    def _by_serial(call: ServiceCall) -> Any:
+        entries = hass.config_entries.async_loaded_entries(DOMAIN)
+        if entry_id := call.data.get("config_entry_id"):
+            entries = [e for e in entries if e.entry_id == entry_id]
+        for entry in entries:
+            if (spec := entry.runtime_data.accessory_by_serial(call.data["serial"])) is not None:
+                return spec
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_accessory",
+            translation_placeholders={"serial": call.data["serial"]},
+        )
+
+    async def _accessory_settings(call: ServiceCall) -> ServiceResponse:
+        return settings.describe(hass, _by_serial(call), call.data["serial"])
+
+    async def _set_accessory_setting(call: ServiceCall) -> None:
+        await settings.async_set(
+            hass, _by_serial(call), call.data["entity_id"], call.data.get("value"))
+
+    by_serial = {vol.Required("serial"): cv.string, vol.Optional("config_entry_id"): cv.string}
+    hass.services.async_register(
+        DOMAIN, "accessory_settings", _accessory_settings, schema=vol.Schema(by_serial),
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN, "set_accessory_setting", _set_accessory_setting,
+        schema=vol.Schema({**by_serial, vol.Required("entity_id"): cv.entity_id,
+                           vol.Optional("value"): vol.Any(str, int, float, bool)}),
+    )
     hass.services.async_register(
         DOMAIN, "room_assignments", _room_assignments,
         schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),

@@ -35,3 +35,32 @@ room_assignments:
       selector:
         config_entry:
           integration: hap_bridge
+
+accessory_settings:
+  fields:
+    serial:
+      required: true
+      selector:
+        text:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: hap_bridge
+
+set_accessory_setting:
+  fields:
+    serial:
+      required: true
+      selector:
+        text:
+    entity_id:
+      required: true
+      selector:
+        entity:
+    value:
+      selector:
+        text:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: hap_bridge

@@ -412,6 +412,33 @@ python3 scripts/assign_rooms.py --url http://homeassistant.local:8123 --apply  #
   HomeClaw must be running on the Mac and signed in to your home. It gets full
   access to your home, so only use it if you're happy with that.
 
+## Accessory settings (for a Home app extension)
+
+A device's own settings, like LED brightness, power-on behaviour or motion
+sensitivity, and its details, like firmware or signal strength, have no
+place in HomeKit, so the bridge leaves those entities out. Apple's Home
+Extensions framework (iOS 27.2 and later) lets an app add settings pages to
+an accessory in the Home app. Apple says it's "available at compile time
+only" for now. These two actions are the Home Assistant side such an
+extension would call:
+
+- `hap_bridge.accessory_settings` takes an accessory's serial number (the
+  `HB-…` one an extension reads from its `HMAccessory`). It returns the
+  device's configuration entities as `settings` and its diagnostic entities
+  as `info`, along with the manufacturer, model, firmware and the device's
+  real serial number. Each setting's `kind` matches a Home Extensions setting:
+  - `toggle`: a switch
+  - `choice`: a select, with its options
+  - `range`: a number, with its minimum, maximum, step and unit
+  - `text`: a text entity
+  - `info`: a read-only value
+
+  Buttons come through as `action`, which a custom view would show as a
+  button.
+- `hap_bridge.set_accessory_setting` changes one of them. It only accepts
+  entities that `accessory_settings` lists for that accessory, so an
+  extension can't use it to control anything else.
+
 ## Stable IDs
 
 Home keys rooms, scenes and automations on AID/IID. AIDs are keyed on the
