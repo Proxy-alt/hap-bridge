@@ -54,7 +54,10 @@ def describe(spec: AccessorySpec, loader: Any) -> dict[str, Any]:
         "source": spec.source,
         "category": spec.category,
         "standalone": spec.standalone,
-        **({"camera": spec.camera, "camera_audio": spec.camera_audio} if spec.camera else {}),
+        **({"camera": spec.camera, "camera_audio": spec.camera_audio,
+            "recording": {"motion": list(spec.recording.motion),
+                          "doorbell": spec.recording.doorbell} if spec.recording else None}
+           if spec.camera else {}),
         **({"default_name": spec.default_name} if spec.default_name != spec.name else {}),
         "available": _safe(spec.is_available),
         "errors": errors,

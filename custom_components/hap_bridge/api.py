@@ -50,6 +50,22 @@ Getter = Callable[[], Any]
 Setter = Callable[[Any], Awaitable[Any] | None]
 
 
+@dataclass(frozen=True)
+class Recording:
+    """What starts a HomeKit Secure Video recording on a camera.
+
+    A recording starts when any `motion` entity turns on, or when the
+    `doorbell` event fires, and ends once they've all been quiet for a while
+    (the hub decides when it has enough). The hub works out by itself whether
+    a clip shows people, animals, vehicles or packages; HomeKit has no way
+    for a camera to say what it saw. So with only person and vehicle sensors
+    as `motion`, a Home app setting to record animals finds nothing.
+    """
+
+    motion: tuple[str, ...] = ()
+    doorbell: str | None = None
+
+
 @dataclass
 class CharSpec:
     name: str
@@ -179,6 +195,8 @@ class AccessorySpec:
         # options flow says the camera has it: ffmpeg can't stream a source
         # without audio when asked for some.
         self.camera_audio = False
+        # HomeKit Secure Video triggers; None means the camera can't record.
+        self.recording: Recording | None = None
         # The name the profile gave, when the options flow renamed it.
         self.default_name = name
         # Which step built it, e.g. "integration:acme", "profile:air_purifier",

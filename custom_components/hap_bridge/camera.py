@@ -9,6 +9,9 @@ Audio from the camera to the Home app is Opus, as a second ffmpeg output.
 It's opt-in per camera, because asking ffmpeg for an audio track the source
 doesn't have stops the video too. Talking back through the camera isn't
 supported: Home Assistant has no way to send audio to a camera.
+
+Cameras with a motion sensor or doorbell also offer HomeKit Secure Video;
+see recording.py.
 """
 
 from __future__ import annotations
@@ -32,9 +35,10 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 
 from .accessories import SpecAvailability
+from .recording import RecordingManager, Triggers
 
 if TYPE_CHECKING:
-    from .api import AccessorySpec
+    from .api import AccessorySpec, Settings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -145,7 +149,48 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         assert spec.camera is not None
         self.entity_id = spec.camera
         self.audio = spec.camera_audio
+        self.recording: RecordingManager | None = None
         super().__init__(camera_options(driver.state.address), driver, *args, **kwargs)
+
+    def setup_recording(self, settings: Settings) -> None:
+        """Offer HomeKit Secure Video, triggered by the spec's recording entities."""
+        triggers = self.spec.recording
+        assert triggers is not None
+        key = f"hksv:{self.spec.key}"
+
+        def triggered() -> bool:
+            return any(
+                (state := self.hass.states.get(eid)) is not None and state.state == "on"
+                for eid in triggers.motion
+            )
+
+        self.recording = RecordingManager(
+            self,
+            name=self.display_name,
+            triggers=Triggers(motion=bool(triggers.motion), doorbell=triggers.doorbell is not None),
+            triggered=triggered,
+            get_source=self._async_source,
+            ffmpeg=get_ffmpeg_manager(self.hass).binary,
+            audio=self.audio,
+            load=lambda: settings.get(key),
+            save=lambda state: settings.set(key, state),
+        )
+
+    async def async_start_recording(self) -> None:
+        if self.recording is None:
+            return
+        try:
+            await self.recording.async_start()
+        except OSError as err:
+            # Live video still works; only HomeKit Secure Video can't connect.
+            _LOGGER.error("%s: can't listen for HomeKit Secure Video: %s", self.display_name, err)
+
+    async def _async_source(self) -> str | None:
+        try:
+            return await ha_camera.async_get_stream_source(self.hass, self.entity_id)
+        except Exception:  # noqa: BLE001 - reported as a failed recording
+            _LOGGER.exception("%s: couldn't get the camera's stream source", self.display_name)
+            return None
 
     async def async_get_snapshot(self, image_size: dict[str, int]) -> bytes:
         image = await ha_camera.async_get_image(
@@ -157,11 +202,10 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         return image.content
 
     async def start_stream(self, session_info: dict[str, Any], stream_config: dict[str, Any]) -> bool:
-        try:
-            source = await ha_camera.async_get_stream_source(self.hass, self.entity_id)
-        except Exception:  # noqa: BLE001 - shown as a failed stream in Home
-            _LOGGER.exception("%s: couldn't get the camera's stream source", self.display_name)
-            source = None
+        if self.recording is not None and not self.recording.streaming_allowed:
+            _LOGGER.debug("%s: streaming is turned off in the Home app", self.display_name)
+            return False
+        source = await self._async_source()
         if not source:
             _LOGGER.error("%s: camera has no stream source to send to HomeKit", self.display_name)
             return False
@@ -233,3 +277,5 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
 
     async def async_stop_streams(self) -> None:
         await asyncio.gather(*(self.stop_stream(s) for s in list(self.sessions.values())))
+        if self.recording is not None:
+            await self.recording.async_stop()

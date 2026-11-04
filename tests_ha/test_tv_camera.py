@@ -196,3 +196,73 @@ async def test_profile_can_turn_camera_audio_on(hass):
 
     result = await testing.async_describe(profile, [testing.entry("camera.door")])
     assert result.accessory().camera_audio
+
+
+async def test_video_doorbell_offers_secure_video(hass, config_entry, devices):
+    bridge = await _setup(hass, config_entry)
+    cam = _unit(bridge, "Front Door").root
+    rec = cam.get_service("CameraRecordingManagement")
+    assert rec is not None and cam.recording.triggers.bits == 0x02  # doorbell only
+    assert cam.get_service("DataStreamTransportManagement") in rec.linked_services
+    assert cam.recording.server.port == 40001
+
+    # The Home app writes the transport setup through the driver; the answer
+    # comes back as the write response, keyed to that HAP connection.
+    import base64
+
+    from pyhap import tlv
+
+    from custom_components.hap_bridge import recording
+
+    driver = _unit(bridge, "Front Door").driver
+    driver.http_server = MagicMock()
+    driver.http_server.connections = {
+        CLIENT: MagicMock(hap_crypto=MagicMock(shared_key=b"k" * 32))}
+    setup = cam.get_service("DataStreamTransportManagement").get_characteristic(
+        "SetupDataStreamTransport")
+    request = base64.b64encode(recording._tlv(1, 0, 2, 0, 3, b"s" * 32)).decode()
+    aid = cam.aid
+    iid = cam.iid_manager.get_iid(setup)
+    result = driver.set_characteristics(
+        {"characteristics": [{"aid": aid, "iid": iid, "value": request, "r": True}]}, CLIENT)
+    (answer,) = result["characteristics"]
+    decoded = tlv.decode(base64.b64decode(answer["value"]))
+    assert decoded[b"\x01"] == b"\x00" and len(decoded[b"\x03"]) == 32
+    assert driver.writing_client is None
+
+    # The Home app turning streaming off stops live video too.
+    cam.recording.state["streaming"] = 0
+    assert not await cam.start_stream({"id": "s", "stream_idx": 0}, {})
+
+
+async def test_recording_triggers_from_a_profile(hass):
+    from custom_components.hap_bridge import testing
+
+    async def profile(ctx):
+        ctx.blocks.camera("camera.drive", motion="binary_sensor.motion", recording={
+            "motion": ["binary_sensor.person", "binary_sensor.vehicle"]})
+
+    hass_ = testing.FakeHass()
+    hass_.states.set("binary_sensor.motion", "on")
+    hass_.states.set("binary_sensor.person", "off")
+    hass_.states.set("binary_sensor.vehicle", "off")
+    entries = [testing.entry("camera.drive"), testing.entry("binary_sensor.motion"),
+               testing.entry("binary_sensor.person"), testing.entry("binary_sensor.vehicle")]
+    result = await testing.async_describe(profile, entries, hass=hass_)
+    result.assert_valid()
+    acc = result.accessory()
+    assert acc.recording.motion == ("binary_sensor.person", "binary_sensor.vehicle")
+    # The camera's Motion Sensor follows the triggers, not plain motion.
+    assert result.values(acc)["MotionSensor.MotionDetected"] is False
+
+    async def off(ctx):
+        ctx.blocks.camera("camera.drive", motion="binary_sensor.motion", recording=False)
+
+    assert (await testing.async_describe(off, entries, hass=hass_)).accessory().recording is None
+
+    async def bad(ctx):
+        ctx.blocks.camera("camera.drive", recording={"motion": ["binary_sensor.motion"],
+                                                     "people": True})
+
+    with pytest.raises(ValueError, match="recording must be a dict"):
+        await testing.async_describe(bad, entries, hass=hass_)

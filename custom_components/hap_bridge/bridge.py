@@ -37,6 +37,7 @@ from .accessories import SpecAccessory, diagnose
 from .adaptive import CHARACTERISTICS as ADAPTIVE_CHARACTERISTICS, AdaptiveLighting
 from .api import AccessorySpec, CharSpec, Settings
 from .const import BRIDGE_AID, DOMAIN, MAX_BRIDGED_ACCESSORIES, STORAGE_VERSION
+from . import recording
 from .ids import IdRegistry, StableIIDManager
 from .profiles import Problem, async_collect_specs
 from .shims import async_load_shims
@@ -81,6 +82,7 @@ class HapBridge:
         )
         self._adaptive_saved: dict[str, Any] = {}
         self._adaptive: list[tuple[str, AdaptiveLighting]] = []
+        self._settings = Settings()
         # Values the Home app sets that profiles keep (TV input names, ...).
         self._settings_store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.settings"
@@ -124,6 +126,7 @@ class HapBridge:
             settings_data,
             lambda: self._settings_store.async_delay_save(lambda: settings_data, 1),
         )
+        self._settings = settings
         zc = await zeroconf.async_get_async_instance(self.hass)
 
         bridge_unit = await self._async_new_unit(
@@ -200,6 +203,9 @@ class HapBridge:
         for unit in self.units.values():
             await unit.driver.async_start()
             unit.running = True
+            for _spec, acc in unit.accessories:
+                if (start := getattr(acc, "async_start_recording", None)) is not None:
+                    await start()
             if unit.driver.state.paired:
                 pairing.async_dismiss(self.hass, unit.id)
             else:
@@ -381,6 +387,9 @@ class HapBridge:
                 acc.set_primary_service(service)
             for linked in svc_spec.linked:
                 service.add_linked_service(built[id(linked)])
+        if spec.camera is not None and spec.recording is not None:
+            # After the spec's services: recording links the Motion Sensor.
+            acc.setup_recording(self._settings)  # type: ignore[attr-defined]
         return acc
 
     def _save_adaptive(self, key: str, transition: dict[str, Any] | None) -> None:
@@ -437,11 +446,22 @@ class HapBridge:
 
 
 class _Driver(AccessoryDriver):
-    """AccessoryDriver that reports successful pairings."""
+    """AccessoryDriver that reports successful pairings, and knows which HAP
+    connection a write came from (HomeKit Secure Video needs its keys)."""
 
     def __init__(self, *args: Any, on_paired: Callable[[], None], **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._on_paired = on_paired
+        self.writing_client: Any = None
+        recording.capture_session_keys()
+        recording.register_definitions(self.loader)
+
+    def set_characteristics(self, chars_query: dict[str, Any], client_addr: Any) -> Any:
+        self.writing_client = client_addr
+        try:
+            return super().set_characteristics(chars_query, client_addr)
+        finally:
+            self.writing_client = None
 
     def pair(
         self, client_username_bytes: bytes, client_public: bytes, client_permissions: bytes

@@ -16,7 +16,7 @@ being described. Getting a block wrong raises ValueError with what to fix.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .profiles import appliances, cameras, fallback, tv
 
@@ -250,14 +250,26 @@ class Blocks:
         doorbell: str | None = None,
         motion: str | None = None,
         audio: bool = False,
+        recording: dict[str, Any] | bool | None = None,
     ) -> AccessorySpec:
         """A standalone camera (live video, snapshots); a video doorbell with `doorbell`.
 
         `audio=True` sends the stream's sound too; only for streams with audio.
+        `recording` picks what starts a HomeKit Secure Video recording, e.g.
+        `{"motion": ["binary_sensor.person", "binary_sensor.vehicle"],
+        "doorbell": "event.ring"}`; by default `motion` and `doorbell`, and
+        `False` turns it off.
         """
         self._entry(camera, "camera")
         if doorbell is not None:
             self._entry(doorbell, "event")
+        if motion is not None:
+            self._entry(motion, "binary_sensor")
+        if isinstance(recording, dict):
+            moving = recording.get("motion") or ()
+            for eid in [moving] if isinstance(moving, str) else moving:
+                self._entry(eid, "binary_sensor")
         return cameras.describe_camera(
-            self._ctx, camera, doorbell=doorbell, motion=motion, audio=audio
+            self._ctx, camera, doorbell=doorbell, motion=motion, audio=audio,
+            recording=recording,
         )

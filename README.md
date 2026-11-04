@@ -289,8 +289,51 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   ffmpeg won't play the video either if it's asked for audio the stream
   doesn't have.
 - Talking back through the camera isn't supported, since Home Assistant has
-  no way to send audio to a camera. HomeKit Secure Video recording isn't
-  supported either.
+  no way to send audio to a camera.
+
+### HomeKit Secure Video
+
+A camera with a motion sensor or a doorbell also offers HomeKit Secure Video.
+Turn it on in the camera's settings in the Home app. You need a home hub
+(Apple TV, HomePod or iPad) and an iCloud+ plan.
+
+- When a trigger fires, the hub asks for a clip. The bridge records the
+  camera's stream with ffmpeg as fragmented MP4 (H.264, plus AAC sound if
+  the camera has audio on and the Home app records audio) and sends it over
+  a HomeKit Data Stream.
+- A clip runs until the hub has enough. As a fallback, the bridge ends it 10
+  seconds after the triggers clear, or after 5 minutes.
+- The hub analyses the clips itself, for people, animals, vehicles and
+  packages. A camera can't tell it what it saw, only what starts a recording.
+- There's no prebuffer yet. ffmpeg starts when the hub asks for the clip, so
+  it begins a second or two after the trigger, not a few seconds before.
+- The protocol isn't published by Apple. This follows HAP-NodeJS's
+  reverse-engineered `RecordingManagement` and `DataStreamServer`; see
+  `recording.py` and `hds.py`.
+
+By default the camera's motion sensor and its doorbell start recordings.
+A profile can choose other entities, for example the person and vehicle
+sensors many cameras have:
+
+```python
+ctx.blocks.camera(
+    "camera.driveway",
+    motion="binary_sensor.driveway_motion",
+    recording={
+        "motion": ["binary_sensor.driveway_person", "binary_sensor.driveway_vehicle"],
+        "doorbell": None,
+    },
+)
+```
+
+- A recording starts when any of the `motion` entities turns on. The
+  camera's Motion Sensor in the Home app follows them, since that's what the
+  hub watches.
+- If only people and vehicles start recordings, choosing "animals" in the
+  Home app won't catch anything, because the hub only analyses what gets
+  recorded.
+- `recording=False` turns HomeKit Secure Video off for that camera. The
+  preview shows each camera's triggers.
 
 ## Adaptive Lighting
 
@@ -386,7 +429,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 - **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
-- **Cameras have no talk-back and no HomeKit Secure Video.** Live video, snapshots, and sound from the camera when it's turned on.
+- **Cameras have no talk-back, and HomeKit Secure Video has no prebuffer.** Clips start a second or two after the trigger. The recording protocol hasn't been tried with a real home hub yet.
 - **Plain speakers aren't exposed.** HomeKit has no useful service for them (only AirPlay speakers show up properly).
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
 - **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.

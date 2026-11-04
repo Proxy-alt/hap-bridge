@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+
+async def _fake_listen(server, host=None):
+    server.port = 40001
+
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -28,6 +32,9 @@ def _auto(enable_custom_integrations, mock_async_zeroconf):
         patch("custom_components.hap_bridge.bridge._Driver.persist"),
         patch("pyhap.util.get_local_address", return_value="127.0.0.1"),
         patch("custom_components.hap_bridge.bridge._port_free", return_value=True),
+        # Sockets are blocked in tests: the HKSV data stream "listens" on a made-up port.
+        patch("custom_components.hap_bridge.hds.DataStreamServer.async_start",
+              side_effect=_fake_listen, autospec=True),
     ):
         yield
 
