@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from typing import Any
 
 from webrtc_models import RTCIceCandidateInit
@@ -123,6 +124,7 @@ async def test_native_webrtc_detection(hass: HomeAssistant):
 async def test_source_registers_the_camera_with_go2rtc(hass: HomeAssistant):
     nest, _ = await _cameras(hass)
     bridge = webrtc.WebRtcBridge.get(hass)
+    bridge._async_local_port = AsyncMock(return_value=40002)  # no sockets in tests
     # Without go2rtc there's no way to convert it.
     assert await bridge.async_source(nest.entity_id) is None
 
@@ -133,13 +135,41 @@ async def test_source_registers_the_camera_with_go2rtc(hass: HomeAssistant):
     (added,) = go2rtc.added
     assert added["url"] == "http://localhost:11984/api/streams"
     assert added["name"] == "hap_bridge_camera_doorbell"
-    assert added["src"].startswith("webrtc:http")
-    assert added["src"].endswith(f"/api/hap_bridge/whep/{bridge.token}/camera.doorbell")
+    # Home Assistant's own go2rtc calls our plain-HTTP port on 127.0.0.1, not
+    # Home Assistant's web server, which may be HTTPS (and invalid for 127.0.0.1).
+    assert added["src"].startswith("webrtc:http://127.0.0.1:40002/")
+    assert added["src"].endswith(f"/whep/{bridge.token}/camera.doorbell")
+    assert "/api/" not in added["src"]
 
     # Someone else's go2rtc: its RTSP server is on its own host.
     hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://192.168.1.9:1984/", session=go2rtc)
     assert (await bridge.async_source(nest.entity_id)).endswith(
         "rtsp://192.168.1.9:8554/hap_bridge_camera_doorbell")
+    # ...and reaches us through Home Assistant's web server.
+    assert f"/api/hap_bridge/whep/{bridge.token}/camera.doorbell" in go2rtc.added[-1]["src"]
+    await bridge.async_shutdown()
+
+
+async def test_local_endpoint_answers_go2rtc(hass: HomeAssistant, socket_enabled):
+    import aiohttp
+
+    nest, _ = await _cameras(hass)
+    bridge = webrtc.WebRtcBridge.get(hass)
+    go2rtc = FakeGo2rtc()
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=go2rtc)
+    await bridge.async_source(nest.entity_id)
+    url = go2rtc.added[0]["src"].removeprefix("webrtc:")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=OFFER) as response:
+                assert response.status == 201
+                answer = Sdp.parse(await response.text())
+            async with session.post(url.replace(bridge.token, "nope"), data=OFFER) as response:
+                assert response.status == 401
+    finally:
+        await bridge.async_shutdown()
+    assert [mid(s) for s in answer.sections] == ["0", "1"]
+    assert len(nest.closed) == 1  # shut down: its session closed too
 
 
 async def test_whep_endpoint_answers_for_the_camera(hass: HomeAssistant, hass_client_no_auth):

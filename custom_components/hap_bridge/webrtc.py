@@ -4,12 +4,16 @@ Those cameras have no stream URL for ffmpeg to read. Home Assistant's
 go2rtc server can receive WebRTC and serve it as RTSP, so this hands each
 such camera to go2rtc as a WHEP source pointing back at Home Assistant:
 
-    go2rtc --(WHEP offer)--> /api/hap_bridge/whep/<token>/<camera>
+    go2rtc --(WHEP offer)--> /whep/<token>/<camera>
            <-- answer ------  camera.async_handle_async_webrtc_offer(...)
     ffmpeg <-- rtsp://127.0.0.1:18554/hap_bridge_<camera> -- go2rtc
 
-The endpoint has no login; a random token in its URL, made when Home
-Assistant starts, is what keeps others out.
+For Home Assistant's own go2rtc, the endpoint is a small plain-HTTP server
+of ours on 127.0.0.1: Home Assistant's own web server may be HTTPS with a
+certificate that isn't valid for 127.0.0.1, which go2rtc would reject. A
+go2rtc elsewhere uses the same endpoint on Home Assistant's web server, at
+its internal URL. Neither has a login; a random token in the URL, made
+when Home Assistant starts, is what keeps others out.
 
 go2rtc never says when it's done with a WebRTC connection, and Nest keeps
 extending a stream until its session is closed. So the camera's sessions
@@ -31,6 +35,7 @@ from aiohttp import web
 
 from homeassistant.components import camera as ha_camera
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_call_later
@@ -80,13 +85,20 @@ class WebRtcBridge:
         self.token = secrets.token_urlsafe(32)
         self._cameras: dict[str, _Camera] = {}
         self._warned = False
+        self._runner: web.AppRunner | None = None
+        self._local_port: int | None = None
+        self._local_lock = asyncio.Lock()
 
     @classmethod
     def get(cls, hass: HomeAssistant) -> WebRtcBridge:
         if (bridge := hass.data.get(DATA_BRIDGE)) is None:
             bridge = hass.data[DATA_BRIDGE] = cls(hass)
             hass.http.register_view(WhepView(bridge))
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, bridge._async_on_stop)
         return bridge
+
+    async def _async_on_stop(self, _event: Any) -> None:
+        await self.async_shutdown()
 
     # -- ffmpeg's side --------------------------------------------------------------
 
@@ -102,7 +114,11 @@ class WebRtcBridge:
                 )
             return None
         name = stream_name(entity_id)
-        source = f"webrtc:{self._whep_url(entity_id)}"
+        try:
+            source = f"webrtc:{await self._async_whep_url(config.url, entity_id)}"
+        except OSError as err:
+            _LOGGER.error("%s: couldn't listen for go2rtc: %s", entity_id, err)
+            return None
         try:
             async with config.session.put(
                 f"{config.url.rstrip('/')}/api/streams", params={"name": name, "src": source},
@@ -113,21 +129,61 @@ class WebRtcBridge:
             return None
         return f"-rtsp_transport tcp -i {self._rtsp_base(config.url)}/{name}"
 
-    def _whep_url(self, entity_id: str) -> str:
+    async def _async_whep_url(self, go2rtc_url: str, entity_id: str) -> str:
+        path = f"whep/{self.token}/{quote(entity_id)}"
+        if _is_local(go2rtc_url):
+            port = await self._async_local_port()
+            return f"http://127.0.0.1:{port}/{path}"
         try:
             base = get_url(self.hass, allow_external=False, allow_cloud=False,
                            prefer_external=False)
         except NoURLAvailableError:
             api = self.hass.config.api
-            base = f"http://127.0.0.1:{api.port if api else 8123}"
-        return f"{base.rstrip('/')}/api/{DOMAIN}/whep/{self.token}/{quote(entity_id)}"
+            scheme = "https" if api and api.use_ssl else "http"
+            base = f"{scheme}://127.0.0.1:{api.port if api else 8123}"
+        return f"{base.rstrip('/')}/api/{DOMAIN}/{path}"
+
+    async def _async_local_port(self) -> int:
+        async with self._local_lock:
+            if self._local_port is None:
+                app = web.Application()
+                app.router.add_post("/whep/{token}/{entity_id}", self._async_local_post)
+                runner = web.AppRunner(app, access_log=None)
+                await runner.setup()
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                try:
+                    await site.start()
+                except OSError:
+                    await runner.cleanup()
+                    raise
+                self._runner = runner
+                self._local_port = runner.addresses[0][1]
+            return self._local_port
+
+    async def _async_local_post(self, request: web.Request) -> web.Response:
+        info = request.match_info
+        return await self.async_handle_post(request, info["token"], info["entity_id"])
+
+    async def async_handle_post(
+        self, request: web.Request, token: str, entity_id: str
+    ) -> web.Response:
+        if not hmac.compare_digest(token.encode(), self.token.encode()):
+            return web.Response(status=401)
+        if not entity_id.startswith("camera.") or not native_webrtc(self.hass, entity_id):
+            return web.Response(status=404)
+        offer = await request.text()
+        try:
+            answer = await self.async_offer(entity_id, offer)
+        except (HomeAssistantError, TimeoutError) as err:
+            _LOGGER.warning("%s: WebRTC for HomeKit failed: %s", entity_id, err)
+            return web.Response(status=502, text=str(err))
+        return web.Response(status=201, text=answer, content_type="application/sdp")
 
     @staticmethod
     def _rtsp_base(go2rtc_url: str) -> str:
-        host = urlparse(go2rtc_url).hostname
-        if host in (None, "localhost", "127.0.0.1"):
+        if _is_local(go2rtc_url):
             return MANAGED_RTSP  # Home Assistant's own go2rtc
-        return f"rtsp://{host}:{OTHER_RTSP_PORT}"
+        return f"rtsp://{urlparse(go2rtc_url).hostname}:{OTHER_RTSP_PORT}"
 
     # -- go2rtc's side --------------------------------------------------------------
 
@@ -223,6 +279,13 @@ class WebRtcBridge:
     async def async_shutdown(self) -> None:
         for entity_id in list(self._cameras):
             await self.async_release(entity_id)
+        if self._runner is not None:
+            runner, self._runner, self._local_port = self._runner, None, None
+            await runner.cleanup()
+
+
+def _is_local(url: str) -> bool:
+    return urlparse(url).hostname in (None, "localhost", "127.0.0.1", "::1")
 
 
 async def _settle(arrived: asyncio.Event, deadline: float) -> None:
@@ -247,14 +310,4 @@ class WhepView(HomeAssistantView):
         self.bridge = bridge
 
     async def post(self, request: web.Request, token: str, entity_id: str) -> web.Response:
-        if not hmac.compare_digest(token.encode(), self.bridge.token.encode()):
-            return web.Response(status=401)
-        if not entity_id.startswith("camera.") or not native_webrtc(self.bridge.hass, entity_id):
-            return web.Response(status=404)
-        offer = await request.text()
-        try:
-            answer = await self.bridge.async_offer(entity_id, offer)
-        except (HomeAssistantError, TimeoutError) as err:
-            _LOGGER.warning("%s: WebRTC for HomeKit failed: %s", entity_id, err)
-            return web.Response(status=502, text=str(err))
-        return web.Response(status=201, text=answer, content_type="application/sdp")
+        return await self.bridge.async_handle_post(request, token, entity_id)

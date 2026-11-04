@@ -298,6 +298,8 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   Ring, and others without a stream URL) go through Home Assistant's go2rtc
   (part of `default_config`). go2rtc receives the camera's WebRTC stream,
   which Home Assistant sets up for it, and ffmpeg reads it back over RTSP.
+  go2rtc reaches the bridge on a private port on 127.0.0.1, so this works
+  whether Home Assistant itself serves HTTP or HTTPS.
   The HomeKit Secure Video prebuffer is off for these cameras, so they aren't
   streaming all day; clips start when the trigger fires, a few seconds late.
 - If the device also has a doorbell `event` entity, the camera becomes a video
