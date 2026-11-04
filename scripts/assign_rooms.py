@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import ssl
 import subprocess
 import sys
 from typing import Any
@@ -96,7 +97,9 @@ def normalize_url(url: str) -> str:
     return url
 
 
-def fetch_assignments(url: str, token: str, entry_id: str | None) -> dict[str, Any]:
+def fetch_assignments(
+    url: str, token: str, entry_id: str | None, verify_tls: bool = True,
+) -> dict[str, Any]:
     body = json.dumps({"config_entry_id": entry_id} if entry_id else {}).encode()
     request = urllib.request.Request(
         f"{normalize_url(url)}/api/services/hap_bridge/room_assignments?return_response",
@@ -104,7 +107,8 @@ def fetch_assignments(url: str, token: str, entry_id: str | None) -> dict[str, A
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - user's HA URL
+    context = None if verify_tls else ssl._create_unverified_context()  # noqa: S323 - opt-in flag
+    with urllib.request.urlopen(request, timeout=30, context=context) as response:  # noqa: S310 - user's HA URL
         return json.load(response)["service_response"]
 
 
@@ -151,12 +155,15 @@ def main() -> None:
     parser.add_argument("--bridge", help="HAP Bridge config entry ID (default: the first)")
     parser.add_argument("--home", help="Home app home name or ID (default: the primary home)")
     parser.add_argument("--homeclaw", help="path to homeclaw-cli")
+    parser.add_argument("--no-verify-tls", action="store_true",
+                        help="skip HTTPS certificate checks (self-signed or IP-addressed HA)")
     parser.add_argument("--apply", action="store_true", help="move accessories (default: preview)")
     args = parser.parse_args()
     if not args.token:
         sys.exit("pass --token or set HA_TOKEN")
 
-    wanted = fetch_assignments(args.url, args.token, args.bridge)
+    wanted = fetch_assignments(args.url, args.token, args.bridge,
+                               verify_tls=not args.no_verify_tls)
     claw = HomeClaw(find_cli(args.homeclaw), args.home)
     home = claw.accessories()
     print(f"Home Assistant: {len(wanted['accessories'])} accessories with an area; "
