@@ -334,3 +334,70 @@ async def test_profiles_can_ask_for_a_video_profile(hass: HomeAssistant):
 
     result = await testing.async_describe(bad, [testing.entry("camera.door")])
     assert any("camera_video_profile 'ultra'" in w for w in sum(result.warnings().values(), []))
+
+
+class FrameGo2rtc(FakeGo2rtc):
+    """Knows which streams it has, and takes snapshots of them."""
+
+    def __init__(self, frame: bytes | None = b"jpeg") -> None:
+        super().__init__()
+        self.frame = frame
+        self.frames: list[dict[str, str]] = []
+
+    def get(self, url, params):
+        if url.endswith("/api/frame.jpeg"):
+            self.frames.append(params)
+            if self.frame is None:
+                raise OSError("no keyframe")
+            return _FrameResponse(raw=self.frame)
+        known = any(a["name"] == params["src"] for a in self.added)
+        return _FrameResponse({"consumers": self.consumers}, status=200 if known else 404)
+
+
+class _FrameResponse(_Response):
+    def __init__(self, body=None, *, raw: bytes = b"", status: int = 200) -> None:
+        super().__init__(body)
+        self.raw, self.status = raw, status
+
+    async def read(self) -> bytes:
+        return self.raw
+
+
+class StreamCamera(Camera):
+    _attr_name = "Shed"
+    _attr_supported_features = CameraEntityFeature.STREAM
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._attr_unique_id = "shed"
+
+    async def stream_source(self) -> str | None:
+        return "rtsp://10.0.0.5/live"
+
+
+async def test_go2rtc_takes_live_snapshots(hass: HomeAssistant):
+    nest, _ = await _cameras(hass)
+    shed = StreamCamera()
+    await hass.data[DATA_COMPONENT].async_add_entities([shed])
+    await hass.async_block_till_done()
+    bridge = webrtc.WebRtcBridge.get(hass)
+    bridge._async_local_port = AsyncMock(return_value=40002)
+    assert await bridge.async_frame(nest.entity_id) is None  # no go2rtc
+
+    go2rtc = FrameGo2rtc()
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=go2rtc)
+    assert await bridge.async_frame(nest.entity_id, height=720) == b"jpeg"
+    (added,) = go2rtc.added
+    assert added["src"].startswith("webrtc:")
+    assert go2rtc.frames == [{"src": "hap_bridge_camera_doorbell", "h": "720"}]
+    # A stream go2rtc already has isn't replaced: live video may be reading it.
+    assert await bridge.async_frame(nest.entity_id) == b"jpeg"
+    assert len(go2rtc.added) == 1 and go2rtc.frames[-1] == {"src": "hap_bridge_camera_doorbell"}
+
+    # A camera with a stream source: go2rtc reads that.
+    assert await bridge.async_frame(shed.entity_id) == b"jpeg"
+    assert go2rtc.added[-1]["src"] == "rtsp://10.0.0.5/live"
+
+    go2rtc.frame = None  # go2rtc couldn't get a frame
+    assert await bridge.async_frame(nest.entity_id) is None
+    await bridge.async_shutdown()

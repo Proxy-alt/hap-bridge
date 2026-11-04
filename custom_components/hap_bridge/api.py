@@ -216,6 +216,11 @@ class AccessorySpec:
         # go2rtc lists. For cameras that pick another profile when given the
         # choice (Google's send High).
         self.camera_video_profile: str | None = None
+        # The camera entity's image isn't kept up to date (many cloud cameras
+        # only refresh it on events): snapshots are frames go2rtc takes from
+        # the live stream instead, so the Home app's thumbnails are current
+        # while it's watching. Each snapshot briefly opens the stream.
+        self.camera_live_snapshots = False
         # Called when the Home app's "Identify Accessory" is tapped.
         self.identify: Callable[[], Any] | None = None
         # The name the profile gave, when the options flow renamed it.

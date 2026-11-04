@@ -29,6 +29,7 @@ def describe_camera(
     status_light: str | None = None,
     privacy: str | None = None,
     video_profile: str | None = None,
+    live_snapshots: bool = False,
 ) -> AccessorySpec:
     """A camera entity streamed to the Home app, as a video doorbell if `doorbell`
     (an event entity) is given, with an optional motion binary sensor. `audio`
@@ -46,12 +47,16 @@ def describe_camera(
     `night_vision` and `status_light` (switches) become those settings in the
     camera's Home app settings, and `privacy` (a switch) shows the camera as
     turned off. They need HomeKit Secure Video, whose service carries them.
+
+    `live_snapshots` says the camera entity's image isn't kept current, so
+    snapshots come from the live stream through go2rtc instead.
     """
     acc = ctx.accessory(
         name, category="VIDEO_DOOR_BELL" if doorbell else "CAMERA", key=key, camera=camera
     )
     acc.camera_audio = audio
     acc.camera_video_profile = video_profile
+    acc.camera_live_snapshots = live_snapshots
     acc.claim(camera)
     acc.available = lambda: ctx.available(camera)
     if doorbell is not None:

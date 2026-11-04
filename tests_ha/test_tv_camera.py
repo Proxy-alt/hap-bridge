@@ -196,6 +196,13 @@ async def test_profile_can_turn_camera_audio_on(hass):
 
     result = await testing.async_describe(profile, [testing.entry("camera.door")])
     assert result.accessory().camera_audio
+    assert not result.accessory().camera_live_snapshots
+
+    async def live(ctx):
+        ctx.blocks.camera("camera.door", live_snapshots=True)
+
+    result = await testing.async_describe(live, [testing.entry("camera.door")])
+    assert result.accessory().camera_live_snapshots
 
 
 async def test_video_doorbell_offers_secure_video(hass, config_entry, devices):
@@ -319,3 +326,38 @@ async def test_event_motion_triggers_from_a_profile(hass):
     rec = result.accessory().recording
     assert rec.motion == ("event.cam",) and rec.doorbell == "event.cam"
     assert rec.motion_events == ("motion", "person")
+
+
+async def test_live_snapshots_come_from_go2rtc(hass, config_entry, devices):
+    from custom_components.hap_bridge.webrtc import WebRtcBridge
+
+    bridge = await _setup(hass, config_entry)
+    cam = _unit(bridge, "Front Door").root
+    size = {"image-width": 640, "image-height": 360}
+    stale = AsyncMock(return_value=Image("image/jpeg", b"event"))
+    gate = asyncio.Event()
+
+    async def frame(entity_id, *, height=None, video_profile=None):
+        await gate.wait()
+        return b"live"
+
+    with patch("homeassistant.components.camera.async_get_image", stale), \
+            patch.object(WebRtcBridge, "async_frame", side_effect=frame) as grab:
+        # Off by default: the camera entity's own image.
+        assert await cam.async_get_snapshot(size) == b"event"
+        assert not grab.called
+
+        cam.spec.camera_live_snapshots = True
+        # Controllers asking at once share one frame.
+        first = asyncio.create_task(cam.async_get_snapshot(size))
+        second = asyncio.create_task(cam.async_get_snapshot(size))
+        await asyncio.sleep(0)
+        gate.set()
+        assert await first == b"live" and await second == b"live"
+        assert grab.call_count == 1
+        assert grab.call_args.kwargs["height"] == 360
+
+        # go2rtc couldn't take one: the camera entity's image after all.
+        grab.side_effect = None
+        grab.return_value = None
+        assert await cam.async_get_snapshot(size) == b"event"

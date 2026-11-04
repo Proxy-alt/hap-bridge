@@ -309,6 +309,15 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   asks for another with `blocks.camera(..., video_profile="high")` (or
   `"main"`, `"baseline"`), for cameras that pick a different one when given
   the choice.
+- Some cameras don't keep their image current (cloud cameras often show the
+  last event's thumbnail). A profile can pass
+  `blocks.camera(..., live_snapshots=True)`. Then each snapshot the Home app
+  asks for, which it does every few seconds while it shows the camera, is a
+  frame that go2rtc takes from the live stream. If go2rtc can't take one in
+  10 seconds, the camera's own image is used. For a WebRTC-only camera,
+  each snapshot opens its stream, which closes again 30 seconds after the
+  last viewer, so thumbnails cost data and battery while the Home app is
+  open on them.
 - If the device also has a doorbell `event` entity, the camera becomes a video
   doorbell, and rings show on your devices with a snapshot.
 - If the device has a motion binary sensor, it's added for motion

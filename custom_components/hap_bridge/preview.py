@@ -65,6 +65,7 @@ def describe(spec: AccessorySpec, loader: Any) -> dict[str, Any]:
         "category": spec.category,
         "standalone": spec.standalone,
         **({"camera": spec.camera, "camera_audio": spec.camera_audio,
+            **({"camera_live_snapshots": True} if spec.camera_live_snapshots else {}),
             "recording": {"motion": list(spec.recording.motion),
                           "doorbell": spec.recording.doorbell,
                           **({"motion_events": list(spec.recording.motion_events)}

@@ -53,6 +53,8 @@ GO2RTC: HassKey[Any] = HassKey("go2rtc")
 MANAGED_RTSP = "rtsp://127.0.0.1:18554"
 OTHER_RTSP_PORT = 8554
 ANSWER_TIMEOUT = 20.0
+# How long go2rtc gets to take a snapshot (open the stream, wait for a keyframe).
+FRAME_TIMEOUT = 10.0
 # After the answer, how long to wait for more trickled candidates.
 CANDIDATE_QUIET = 0.5
 CANDIDATE_MAX = 2.0
@@ -125,15 +127,70 @@ class WebRtcBridge:
         except OSError as err:
             _LOGGER.error("%s: couldn't listen for go2rtc: %s", entity_id, err)
             return None
+        if not await self._async_put_stream(config, entity_id, source):
+            return None
+        return f"-rtsp_transport tcp -i {self._rtsp_base(config.url)}/{name}"
+
+    async def _async_put_stream(self, config: Any, entity_id: str, source: str) -> bool:
         try:
             async with config.session.put(
-                f"{config.url.rstrip('/')}/api/streams", params={"name": name, "src": source},
+                f"{config.url.rstrip('/')}/api/streams",
+                params={"name": stream_name(entity_id), "src": source},
             ) as response:
                 response.raise_for_status()
         except Exception as err:  # noqa: BLE001 - reported, then no stream
             _LOGGER.error("%s: couldn't add the camera to go2rtc: %s", entity_id, err)
+            return False
+        return True
+
+    async def async_frame(
+        self, entity_id: str, *, height: int | None = None, video_profile: str | None = None
+    ) -> bytes | None:
+        """A JPEG frame of the camera's live stream, taken by go2rtc; None if
+        there's no go2rtc or it couldn't get one.
+
+        The camera's go2rtc stream is added if go2rtc doesn't have it yet
+        (a stream it has isn't replaced: live video may be reading it). A
+        WebRTC-only camera's stream comes through us and is closed once go2rtc
+        has no viewers; others use the camera's stream source.
+        """
+        config = self.hass.data.get(GO2RTC)
+        if config is None:
             return None
-        return f"-rtsp_transport tcp -i {self._rtsp_base(config.url)}/{name}"
+        if not await self._async_has_stream(config, entity_id):
+            if native_webrtc(self.hass, entity_id):
+                if await self.async_source(entity_id, video_profile=video_profile) is None:
+                    return None
+            else:
+                try:
+                    source = await ha_camera.async_get_stream_source(self.hass, entity_id)
+                except Exception:  # noqa: BLE001 - no frame; the caller falls back
+                    _LOGGER.debug("%s: no stream source", entity_id, exc_info=True)
+                    return None
+                if not source or not await self._async_put_stream(config, entity_id, source):
+                    return None
+        params = {"src": stream_name(entity_id)}
+        if height:
+            params["h"] = str(height)
+        try:
+            async with asyncio.timeout(FRAME_TIMEOUT), config.session.get(
+                f"{config.url.rstrip('/')}/api/frame.jpeg", params=params,
+            ) as response:
+                response.raise_for_status()
+                image = await response.read()
+        except Exception as err:  # noqa: BLE001 - the caller falls back
+            _LOGGER.debug("%s: go2rtc couldn't take a snapshot: %r", entity_id, err)
+            return None
+        return image or None
+
+    async def _async_has_stream(self, config: Any, entity_id: str) -> bool:
+        try:
+            async with config.session.get(
+                f"{config.url.rstrip('/')}/api/streams", params={"src": stream_name(entity_id)},
+            ) as response:
+                return response.status == 200
+        except Exception:  # noqa: BLE001 - add it again; harmless
+            return False
 
     async def _async_whep_url(self, go2rtc_url: str, entity_id: str) -> str:
         path = f"whep/{self.token}/{quote(entity_id)}"

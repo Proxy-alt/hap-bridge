@@ -155,6 +155,8 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         self.entity_id = spec.camera
         self.audio = spec.camera_audio
         self.recording: RecordingManager | None = None
+        # A live snapshot being taken; requests meanwhile share it.
+        self._frame: asyncio.Task[bytes | None] | None = None
         super().__init__(camera_options(driver.state.address), driver, *args, **kwargs)
 
     def setup_recording(self, settings: Settings) -> None:
@@ -213,6 +215,9 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         ):
             # Turned off in the Home app (camera off, or that kind of snapshot).
             raise PermissionError("snapshots are turned off in the Home app")
+        if self.spec.camera_live_snapshots:
+            if (frame := await self._async_live_frame(image_size["image-height"])) is not None:
+                return frame
         image = await ha_camera.async_get_image(
             self.hass,
             self.entity_id,
@@ -220,6 +225,22 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             height=image_size["image-height"],
         )
         return image.content
+
+    async def _async_live_frame(self, height: int) -> bytes | None:
+        """A frame of the live stream from go2rtc, for cameras whose image is
+        stale. Controllers often ask at once; they share one frame."""
+        if self._frame is None:
+            self._frame = self.hass.async_create_task(
+                WebRtcBridge.get(self.hass).async_frame(
+                    self.entity_id, height=height,
+                    video_profile=self.spec.camera_video_profile),
+                f"{self.display_name} snapshot",
+            )
+            self._frame.add_done_callback(lambda _task: setattr(self, "_frame", None))
+        frame = await asyncio.shield(self._frame)
+        if frame is None:
+            _LOGGER.debug("%s: no live snapshot; using the camera's image", self.display_name)
+        return frame
 
     async def start_stream(self, session_info: dict[str, Any], stream_config: dict[str, Any]) -> bool:
         if self.recording is not None and not self.recording.streaming_allowed:
