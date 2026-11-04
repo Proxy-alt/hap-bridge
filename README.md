@@ -305,8 +305,19 @@ bulbs run the schedule themselves, so here the bridge does it for them:
 The protocol isn't published by Apple. This follows HAP-NodeJS's
 reverse-engineered `AdaptiveLightingController`; see `transition.py`.
 
-A profile turns it on with `svc.adaptive_lighting(light_entity_id)` on a
-Lightbulb that has Brightness, ColorTemperature and an `on_write`.
+The bridge offers it on every Lightbulb that has Brightness,
+ColorTemperature and an `on_write`, when ColorTemperature watches a light
+that supports color temperature, so profiles get it without asking. That
+includes ones integrations and shims build by hand. A Lightbulb with
+per-characteristic setters and no `on_write` can't offer it; the preview
+warns about that. A profile can:
+
+- name the light, when ColorTemperature doesn't watch it:
+  `svc.adaptive_lighting("light.desk")`;
+- opt out: `svc.adaptive_lighting(enabled=False)`.
+
+It's only offered. Each light stays on its normal color until someone turns
+Adaptive Lighting on for it in the Home app.
 
 ## Stable IDs
 

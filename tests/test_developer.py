@@ -207,3 +207,74 @@ async def test_example_shims_are_valid():
         testing.entry("sensor.robo_battery", device_class="battery"),
     ], hass=hass)
     result.assert_valid()
+
+
+def _hand_built_light(**adaptive):
+    """A Lightbulb an integration builds itself, without blocks."""
+
+    async def profile(ctx):
+        light = ctx.entity("light")
+        svc = ctx.accessory(category="LIGHTBULB").service("Lightbulb", primary=True)
+        svc.char("On", watch=[light], get=lambda: ctx.is_on(light))
+        svc.char("Brightness", watch=[light], get=lambda: 50)
+        svc.char("ColorTemperature", watch=[light], get=lambda: 250)
+        svc.on_write(lambda values: None)
+        if adaptive:
+            svc.adaptive_lighting(**adaptive)
+
+    return profile
+
+
+def _lightbulb(result):
+    return next(s for s in result.accessory().services if s.type_name == "Lightbulb")
+
+
+CT_LIGHT = {"supported_color_modes": ["color_temp"]}
+
+
+@run
+async def test_hand_built_light_gets_adaptive_lighting():
+    result = await testing.async_describe(
+        _hand_built_light(), [testing.entry("light.desk", capabilities=CT_LIGHT)])
+    result.assert_valid()
+    assert _lightbulb(result).adaptive_light == "light.desk"
+
+
+@run
+async def test_adaptive_lighting_needs_a_color_temperature_light():
+    result = await testing.async_describe(
+        _hand_built_light(), [testing.entry("light.desk", capabilities={
+            "supported_color_modes": ["brightness"]})])
+    assert _lightbulb(result).adaptive_light is None
+
+
+@run
+async def test_profile_can_opt_out_of_adaptive_lighting():
+    result = await testing.async_describe(
+        _hand_built_light(enabled=False), [testing.entry("light.desk", capabilities=CT_LIGHT)])
+    result.assert_valid()
+    assert _lightbulb(result).adaptive_light is None
+
+
+@run
+async def test_explicit_adaptive_lighting_without_a_light_is_an_error():
+    result = await testing.async_describe(
+        _hand_built_light(light_entity_id=None), [testing.entry("light.desk")])
+    with pytest.raises(AssertionError, match="Adaptive Lighting needs a light"):
+        result.assert_valid()
+
+
+@run
+async def test_light_without_on_write_gets_a_hint():
+    async def profile(ctx):
+        light = ctx.entity("light")
+        svc = ctx.accessory(category="LIGHTBULB").service("Lightbulb", primary=True)
+        svc.char("On", watch=[light], get=lambda: True, set=lambda v: None)
+        svc.char("Brightness", watch=[light], get=lambda: 50, set=lambda v: None)
+        svc.char("ColorTemperature", watch=[light], get=lambda: 250, set=lambda v: None)
+
+    result = await testing.async_describe(
+        profile, [testing.entry("light.desk", capabilities=CT_LIGHT)])
+    result.assert_valid()
+    assert any("can't offer Adaptive Lighting" in w
+               for w in sum(result.warnings().values(), []))

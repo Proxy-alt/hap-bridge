@@ -178,3 +178,29 @@ async def test_preview_needs_a_bridge(hass, purifier):
         await hass.services.async_call(
             DOMAIN, "preview", {"device_id": purifier.device.id}, blocking=True,
             return_response=True)
+
+
+async def test_integration_light_gets_adaptive_lighting(hass, config_entry):
+    source = MockConfigEntry(domain=ACME)
+    source.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=source.entry_id, identifiers={(ACME, "l1")}, name="Desk Lamp")
+    light = er.async_get(hass).async_get_or_create(
+        "light", ACME, "l1", device_id=device.id, config_entry=source,
+        capabilities={"supported_color_modes": ["color_temp"],
+                      "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6500})
+    hass.states.async_set(light.entity_id, "on", {"brightness": 128, "color_temp_kelvin": 4000})
+
+    async def lamp(ctx):
+        eid = ctx.entity("light")
+        svc = ctx.accessory(category="LIGHTBULB").service("Lightbulb", primary=True)
+        svc.char("On", watch=[eid], get=lambda: ctx.is_on(eid))
+        svc.char("Brightness", watch=[eid], get=lambda: 50)
+        svc.char("ColorTemperature", watch=[eid], get=lambda: 250)
+        svc.on_write(lambda values: None)
+
+    with _ship(_profile(lamp)):
+        bridge = await _start(hass, config_entry)
+    assert bridge.diagnostics()["adaptive_lighting"] == {light.entity_id: False}
+    (acc,) = [a for a in bridge.diagnostics()["accessories"] if light.entity_id in a["watches"]]
+    assert acc["source"] == f"integration:{ACME}"

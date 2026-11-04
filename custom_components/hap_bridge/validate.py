@@ -67,6 +67,22 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
             if name != "Name" and (name not in svc.chars or svc.chars[name].get is None):
                 warnings.append(f"{svc.type_name}.{name} is required but never set")
 
+        if svc.adaptive_wanted and svc.adaptive_light is None:
+            errors.append(
+                "Adaptive Lighting needs a light: ColorTemperature watches none that "
+                "supports color temperature, so pass one to adaptive_lighting()"
+            )
+        if (
+            svc.type_name == "Lightbulb"
+            and svc.adaptive_wanted is None
+            and svc.adaptive_light is None
+            and {"Brightness", "ColorTemperature"} <= set(svc.chars)
+            and svc.write is None
+        ):
+            warnings.append(
+                "Lightbulb has ColorTemperature but no on_write, so it can't offer "
+                "Adaptive Lighting"
+            )
         if svc.adaptive_light is not None and (
             svc.type_name != "Lightbulb"
             or not {"Brightness", "ColorTemperature"} <= set(svc.chars)

@@ -73,6 +73,9 @@ class ServiceSpec:
         self.linked: list[ServiceSpec] = []
         self.write: Callable[[dict[str, Any]], Awaitable[Any] | None] | None = None
         self.adaptive_light: str | None = None
+        # None: decided by the bridge (on for a color-temperature light);
+        # True/False: the profile asked for it, or opted out.
+        self.adaptive_wanted: bool | None = None
 
     @property
     def unique_id(self) -> str | None:
@@ -133,15 +136,22 @@ class ServiceSpec:
         self.write = write
         return self
 
-    def adaptive_lighting(self, light_entity_id: str) -> ServiceSpec:
+    def adaptive_lighting(
+        self, light_entity_id: str | None = None, *, enabled: bool = True
+    ) -> ServiceSpec:
         """Offer Adaptive Lighting on this Lightbulb, run by the bridge.
 
-        Needs Brightness, ColorTemperature and an `on_write` that turns
-        ColorTemperature (mireds) into the light's color temperature. The
-        bridge then follows the Home app's schedule by calling light.turn_on
-        on `light_entity_id`, and stops when a color is chosen by hand.
+        The bridge already does this for any Lightbulb with Brightness,
+        ColorTemperature and an `on_write` whose ColorTemperature watches a
+        light that supports color temperature, so most profiles never call
+        it. Call it to name the light when ColorTemperature doesn't watch it,
+        or with `enabled=False` to opt out.
+
+        The bridge follows the Home app's schedule by calling light.turn_on
+        on the light, and stops when a color is chosen by hand.
         """
-        self.adaptive_light = light_entity_id
+        self.adaptive_wanted = enabled
+        self.adaptive_light = light_entity_id if enabled else None
         return self
 
 

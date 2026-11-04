@@ -291,6 +291,41 @@ PROFILES: list[Profile] = [
     air_quality_sensor, buttons,
 ]
 
-FINISHERS: list[Profile] = [device_status]
+def adaptive_lighting(ctx: HapContext) -> None:
+    """Offer Adaptive Lighting on every Lightbulb that can run it.
+
+    That's one with Brightness, ColorTemperature and an on_write, whose
+    ColorTemperature watches a light that supports color temperature, and
+    whose profile didn't opt out. Bundled lights already ask for it; this
+    catches the ones integrations and shims build by hand.
+    """
+    for acc in ctx.accessories:
+        for svc in acc.services:
+            if (
+                svc.type_name != "Lightbulb"
+                or svc.adaptive_light is not None
+                or svc.adaptive_wanted is False
+                or "ColorTemperature" not in svc.chars
+                # Asked for explicitly: resolve the light and let validation
+                # explain anything else that's missing.
+                or (not svc.adaptive_wanted and ("Brightness" not in svc.chars or svc.write is None))
+            ):
+                continue
+            light = next(
+                (eid for eid in svc.chars["ColorTemperature"].watch if _has_color_temp(ctx, eid)),
+                None,
+            )
+            if light is not None:
+                svc.adaptive_light = light
+
+
+def _has_color_temp(ctx: HapContext, entity_id: str) -> bool:
+    ent = ctx.entry(entity_id)
+    if ent is None or ent.domain != "light":
+        return False
+    return "color_temp" in ((ent.capabilities or {}).get("supported_color_modes") or [])
+
+
+FINISHERS: list[Profile] = [device_status, adaptive_lighting]
 
 BY_INTEGRATION: dict[str, list[Profile]] = {}

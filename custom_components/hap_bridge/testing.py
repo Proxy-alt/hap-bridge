@@ -229,4 +229,8 @@ async def async_describe(
     ctx = HapContext(hass, device or None, list(entities), settings)
     ctx.source = "test"
     await _maybe_await(profile(ctx))
+    # What the bridge adds to any profile's lights, so tests see it too.
+    from .profiles.generic import adaptive_lighting
+
+    adaptive_lighting(ctx)
     return Result(ctx, hass, list(ctx.accessories))
