@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1C2C55"/>
+      <stop offset="1" stop-color="#0E1730"/>
+    </linearGradient>
+    <linearGradient id="warm" gradientUnits="userSpaceOnUse" x1="0" y1="98" x2="0" y2="410">
+      <stop offset="0" stop-color="#FFC247"/>
+      <stop offset="1" stop-color="#FF8A1F"/>
+    </linearGradient>
+    <linearGradient id="cool" gradientUnits="userSpaceOnUse" x1="0" y1="98" x2="0" y2="410">
+      <stop offset="0" stop-color="#5CDBFF"/>
+      <stop offset="1" stop-color="#1E9BF0"/>
+    </linearGradient>
+    <clipPath id="left"><rect width="256" height="512"/></clipPath>
+    <clipPath id="right"><rect x="256" width="256" height="512"/></clipPath>
+    <clipPath id="house"><path d="M256 92 L100 224 V412 H412 V224 Z"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g stroke-width="28" stroke-linejoin="round">
+    <path clip-path="url(#left)" d="M256 112 L116 232 V396 H256 Z" fill="url(#cool)" stroke="url(#cool)"/>
+    <path clip-path="url(#right)" d="M256 112 L396 232 V396 H256 Z" fill="url(#warm)" stroke="url(#warm)"/>
+  </g>
+  <circle cx="268.5" cy="288" r="40" fill="url(#cool)"/>
+  <path clip-path="url(#house)" d="M256 60 V250 A40 40 0 1 1 256 326 V450" fill="none" stroke="#14214A" stroke-width="12"/>
+</svg>
