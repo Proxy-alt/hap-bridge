@@ -77,6 +77,7 @@ def stream_name(entity_id: str) -> str:
 class _Camera:
     sessions: list[str] = field(default_factory=list)
     unsub_idle: CALLBACK_TYPE | None = None
+    pending: int = 0  # offers waiting for the camera's answer
 
 
 class WebRtcBridge:
@@ -88,6 +89,7 @@ class WebRtcBridge:
         self._runner: web.AppRunner | None = None
         self._local_port: int | None = None
         self._local_lock = asyncio.Lock()
+        self._video_profiles: dict[str, str | None] = {}
 
     @classmethod
     def get(cls, hass: HomeAssistant) -> WebRtcBridge:
@@ -102,8 +104,12 @@ class WebRtcBridge:
 
     # -- ffmpeg's side --------------------------------------------------------------
 
-    async def async_source(self, entity_id: str) -> str | None:
-        """An ffmpeg input for the camera, through go2rtc."""
+    async def async_source(
+        self, entity_id: str, *, video_profile: str | None = None
+    ) -> str | None:
+        """An ffmpeg input for the camera, through go2rtc. `video_profile`:
+        see AccessorySpec.camera_video_profile."""
+        self._video_profiles[entity_id] = video_profile
         config = self.hass.data.get(GO2RTC)
         if config is None:
             if not self._warned:
@@ -193,8 +199,26 @@ class WebRtcBridge:
         state = self._cameras.setdefault(entity_id, _Camera())
         # go2rtc only reconnects once its last connection is gone.
         self._close_sessions(camera, state)
+        # Until go2rtc has the answer it has no viewers; don't count that as idle.
+        if state.unsub_idle is not None:
+            state.unsub_idle()
+            state.unsub_idle = None
+        state.pending += 1
+        try:
+            return await self._async_answer(camera, state, offer)
+        finally:
+            state.pending -= 1
+            self._watch_idle(entity_id)
 
-        camera_offer, rewrite = offer_for_camera(offer)
+    async def _async_answer(self, camera: Any, state: _Camera, offer: str) -> str:
+        # What the frontend would do: a data channel if the camera asks for one.
+        config = camera.async_get_webrtc_client_configuration()
+        camera_offer, rewrite = offer_for_camera(
+            offer, data_channel=config.data_channel is not None,
+            video_profile=self._video_profiles.get(camera.entity_id),
+        )
+        _LOGGER.debug("%s: go2rtc's offer:\n%s\noffer sent to the camera:\n%s",
+                      camera.entity_id, offer, camera_offer)
         session_id = ulid()
         loop = asyncio.get_running_loop()
         answer: asyncio.Future[str] = loop.create_future()
@@ -222,8 +246,10 @@ class WebRtcBridge:
             raise
         if "a=candidate:" not in sdp or candidates:
             await _settle(arrived, loop.time() + CANDIDATE_MAX)
-        self._watch_idle(entity_id)
-        return answer_for_go2rtc(sdp, rewrite, candidates)
+        result = answer_for_go2rtc(sdp, rewrite, candidates)
+        _LOGGER.debug("%s: camera's answer:\n%s\ntrickled candidates: %s\nanswer sent to go2rtc:\n%s",
+                      camera.entity_id, sdp, candidates, result)
+        return result
 
     def _close_sessions(self, camera: Any, state: _Camera) -> None:
         for session_id in state.sessions:
@@ -234,13 +260,16 @@ class WebRtcBridge:
         state.sessions.clear()
 
     def _watch_idle(self, entity_id: str) -> None:
-        state = self._cameras[entity_id]
+        if (state := self._cameras.get(entity_id)) is None:
+            return  # released meanwhile
         if state.unsub_idle is not None:
             state.unsub_idle()
 
         async def check(_now: Any) -> None:
             state.unsub_idle = None
-            if await self._async_watched(entity_id):
+            if self._cameras.get(entity_id) is not state:
+                return
+            if state.pending or await self._async_watched(entity_id):
                 self._watch_idle(entity_id)
                 return
             _LOGGER.debug("%s: go2rtc has no viewers; closing the WebRTC stream", entity_id)

@@ -9,13 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 from .api import AccessorySpec
+from .sdp import VIDEO_PROFILES
 
 # Characteristics HomeKit accepts on a service although HAP-python's bundled
 # catalogue (which predates them) doesn't list them there.
 EXTRA_CHARACTERISTICS: dict[str, set[str]] = {
     "Lightbulb": {"ColorTemperature"},
 }
-
 
 # Services the camera accessory completes itself (see recording.py).
 _MANAGED = {"CameraRecordingManagement", "CameraOperatingMode", "DataStreamTransportManagement"}
@@ -30,6 +30,10 @@ def validate_spec(spec: AccessorySpec, loader: Any) -> tuple[list[str], list[str
         errors.append("no services")
     if sum(1 for s in spec.services if s.primary) > 1:
         errors.append("more than one primary service")
+    profile = getattr(spec, "camera_video_profile", None)
+    if profile is not None and profile not in VIDEO_PROFILES:
+        warnings.append(f"camera_video_profile {profile!r} isn't one of "
+                        f"{', '.join(VIDEO_PROFILES)}; it's ignored")
 
     explicit: set[tuple[str, str]] = set()
     for svc in spec.services:

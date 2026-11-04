@@ -199,6 +199,12 @@ class AccessorySpec:
         self.recording: Recording | None = None
         # Keep ffmpeg running so recordings start before their trigger.
         self.camera_prebuffer = True
+        # For cameras that only stream over WebRTC: the H.264 profile to ask
+        # the camera for ("baseline", "main" or "high"). go2rtc passes on only
+        # one, so the camera is offered just that one; by default the first
+        # go2rtc lists. For cameras that pick another profile when given the
+        # choice (Google's send High).
+        self.camera_video_profile: str | None = None
         # Called when the Home app's "Identify Accessory" is tapped.
         self.identify: Callable[[], Any] | None = None
         # The name the profile gave, when the options flow renamed it.

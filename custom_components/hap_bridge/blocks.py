@@ -262,6 +262,7 @@ class Blocks:
         night_vision: str | None = None,
         status_light: str | None = None,
         privacy: str | None = None,
+        video_profile: str | None = None,
     ) -> AccessorySpec:
         """A standalone camera (live video, snapshots); a video doorbell with `doorbell`.
 
@@ -271,6 +272,8 @@ class Blocks:
         "doorbell": "event.ring"}`; by default `motion` and `doorbell`, and
         `False` turns it off. `night_vision`, `status_light` and `privacy`
         (switches) appear in the camera's settings in the Home app.
+        `video_profile` ("baseline", "main", "high") is the H.264 profile to
+        ask a WebRTC-only camera for; see AccessorySpec.camera_video_profile.
         """
         self._entry(camera, "camera")
         if doorbell is not None:
@@ -287,5 +290,5 @@ class Blocks:
         return cameras.describe_camera(
             self._ctx, camera, doorbell=doorbell, motion=motion, audio=audio,
             recording=recording, night_vision=night_vision, status_light=status_light,
-            privacy=privacy,
+            privacy=privacy, video_profile=video_profile,
         )

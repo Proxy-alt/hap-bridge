@@ -14,6 +14,7 @@ from homeassistant.components.camera import (
     CameraEntityFeature,
     WebRTCAnswer,
     WebRTCCandidate,
+    WebRTCClientConfiguration,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
@@ -57,6 +58,9 @@ class NestLike(Camera):
 
     async def async_on_webrtc_candidate(self, session_id: str, candidate: Any) -> None:
         pass
+
+    def _async_get_webrtc_client_configuration(self) -> WebRTCClientConfiguration:
+        return WebRTCClientConfiguration(data_channel="dataSendChannel")
 
     def close_webrtc_session(self, session_id: str) -> None:
         self.closed.append(session_id)
@@ -233,3 +237,100 @@ async def test_idle_streams_are_closed(hass: HomeAssistant, hass_client_no_auth)
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2 * webrtc.IDLE_CHECK + 2))
     await hass.async_block_till_done()
     assert len(nest.closed) == 1
+
+
+async def test_idle_check_waits_for_a_slow_answer(hass: HomeAssistant):
+    """go2rtc has no viewers until it has the answer; that isn't idle."""
+    import asyncio
+    from datetime import timedelta
+
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    from homeassistant.util import dt as dt_util
+
+    nest, _ = await _cameras(hass)
+    bridge = webrtc.WebRtcBridge.get(hass)
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=FakeGo2rtc())
+    await bridge.async_offer(nest.entity_id, OFFER)  # starts the idle timer
+
+    release = asyncio.Event()
+    answer_now = NestLike.async_handle_async_webrtc_offer
+
+    async def slow(self, offer_sdp, session_id, send_message):
+        await release.wait()
+        await answer_now(self, offer_sdp, session_id, send_message)
+
+    nest.async_handle_async_webrtc_offer = slow.__get__(nest)
+    offer = hass.async_create_task(bridge.async_offer(nest.entity_id, OFFER))
+    await asyncio.sleep(0)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=webrtc.IDLE_CHECK + 1))
+    await asyncio.sleep(0)
+    closed = list(nest.closed)
+    release.set()
+    answer = await offer
+    assert Sdp.parse(answer).sections
+    assert len(closed) == 1  # only the first session, replaced by the new one
+    assert nest.entity_id in bridge._cameras
+    await bridge.async_shutdown()
+
+
+H264_OFFER = OFFER.replace(
+    "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n",
+    "m=video 9 UDP/TLS/RTP/SAVPF 96 98\r\n",
+).replace(
+    "a=recvonly\r\nm=audio",
+    "a=rtpmap:96 H264/90000\r\na=fmtp:96 profile-level-id=42e01f\r\n"
+    "a=rtpmap:98 H264/90000\r\na=fmtp:98 profile-level-id=640032\r\na=recvonly\r\nm=audio",
+)
+
+
+class PlainWebRtc(NestLike):
+    """A WebRTC camera whose settings ask for no data channel."""
+
+    _attr_name = "Porch"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._attr_unique_id = "porch"
+
+    def _async_get_webrtc_client_configuration(self) -> WebRTCClientConfiguration:
+        return WebRTCClientConfiguration()
+
+
+async def test_offer_follows_the_cameras_settings_and_profile(hass: HomeAssistant):
+    nest, _ = await _cameras(hass)
+    plain = PlainWebRtc()
+    await hass.data[DATA_COMPONENT].async_add_entities([plain])
+    await hass.async_block_till_done()
+    bridge = webrtc.WebRtcBridge.get(hass)
+    bridge._async_local_port = AsyncMock(return_value=40002)
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=FakeGo2rtc())
+
+    # The data channel is there only for the camera that asks for one.
+    await bridge.async_offer(plain.entity_id, H264_OFFER)
+    assert [kind(s) for s in Sdp.parse(plain.offers[0]).sections] == ["audio", "video"]
+    await bridge.async_source(nest.entity_id, video_profile="high")
+    await bridge.async_offer(nest.entity_id, H264_OFFER)
+    audio, video, _data = Sdp.parse(nest.offers[0]).sections
+    # One H.264 payload type: the profile the accessory asked for...
+    assert video[0].endswith("SAVPF 98")
+    # ...else go2rtc's first.
+    video = Sdp.parse(plain.offers[0]).sections[1]
+    assert video[0].endswith("SAVPF 96")
+    await bridge.async_shutdown()
+
+
+async def test_profiles_can_ask_for_a_video_profile(hass: HomeAssistant):
+    from custom_components.hap_bridge import testing
+
+    async def profile(ctx):
+        ctx.blocks.camera("camera.door", video_profile="high")
+
+    result = await testing.async_describe(profile, [testing.entry("camera.door")])
+    assert result.accessory().camera_video_profile == "high"
+
+    async def bad(ctx):
+        ctx.blocks.camera("camera.door", video_profile="ultra")
+
+    result = await testing.async_describe(bad, [testing.entry("camera.door")])
+    assert any("camera_video_profile 'ultra'" in w for w in sum(result.warnings().values(), []))

@@ -18,6 +18,7 @@ through Home Assistant's go2rtc; see webrtc.py.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import timedelta
 import logging
 import os
@@ -81,6 +82,8 @@ RESOLUTIONS = [
 ]
 STREAM_COUNT = 3
 WATCH_INTERVAL = timedelta(seconds=5)
+# Lines of ffmpeg's output to show when it stops unexpectedly.
+FFMPEG_TAIL = 15
 
 
 def camera_options(address: str) -> dict[str, Any]:
@@ -198,7 +201,8 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             _LOGGER.exception("%s: couldn't get the camera's stream source", self.display_name)
             return None
         if not source and native_webrtc(self.hass, self.entity_id):
-            return await WebRtcBridge.get(self.hass).async_source(self.entity_id)
+            return await WebRtcBridge.get(self.hass).async_source(
+                self.entity_id, video_profile=self.spec.camera_video_profile)
         return source
 
     async def async_get_snapshot(self, image_size: dict[str, int]) -> bytes:
@@ -241,8 +245,9 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         session_info["stream"] = stream
         session_info["pid"] = stream.process.pid
         stderr = await stream.get_reader(source=FFMPEG_STDERR)
+        session_info["output"] = output = deque(maxlen=FFMPEG_TAIL)
         session_info["logger"] = self.hass.async_create_background_task(
-            self._async_log(stderr), f"hap_bridge camera log {self.entity_id}"
+            self._async_log(stderr, output), f"hap_bridge camera log {self.entity_id}"
         )
 
         async def _watch(_now: Any) -> None:
@@ -255,7 +260,9 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         """Free the stream slot if ffmpeg has died."""
         if _pid_alive(session_info["pid"]):
             return True
-        _LOGGER.warning("%s: ffmpeg stopped unexpectedly", self.display_name)
+        output = "\n".join(session_info.get("output") or ()) or "(no output)"
+        _LOGGER.warning("%s: ffmpeg stopped unexpectedly. Its last output:\n%s",
+                        self.display_name, output)
         self._stop_watching(session_info)
         self.set_streaming_available(session_info["stream_idx"])
         return False
@@ -267,9 +274,11 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         if (task := session_info.pop("logger", None)) is not None:
             task.cancel()
 
-    async def _async_log(self, reader: asyncio.StreamReader) -> None:
+    async def _async_log(self, reader: asyncio.StreamReader, output: deque[str]) -> None:
         while line := await reader.readline():
-            _LOGGER.debug("%s: ffmpeg: %s", self.display_name, line.rstrip())
+            text = line.decode(errors="replace").rstrip()
+            output.append(text)
+            _LOGGER.debug("%s: ffmpeg: %s", self.display_name, text)
 
     async def stop_stream(self, session_info: dict[str, Any]) -> None:
         if (stream := session_info.get("stream")) is None:

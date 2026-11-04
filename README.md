@@ -302,6 +302,13 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   whether Home Assistant itself serves HTTP or HTTPS.
   The HomeKit Secure Video prebuffer is off for these cameras, so they aren't
   streaming all day; clips start when the trigger fires, a few seconds late.
+  The bridge asks the camera the way Home Assistant's frontend does: audio
+  before video, and a data channel only if the camera's WebRTC settings ask
+  for one. go2rtc passes on only one video format, so the camera is offered
+  only one H.264 profile. That's the first go2rtc lists, unless the profile
+  asks for another with `blocks.camera(..., video_profile="high")` (or
+  `"main"`, `"baseline"`), for cameras that pick a different one when given
+  the choice.
 - If the device also has a doorbell `event` entity, the camera becomes a video
   doorbell, and rings show on your devices with a snapshot.
 - If the device has a motion binary sensor, it's added for motion
@@ -551,7 +558,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 
 ## Not done yet
 
-- **WebRTC cameras haven't been tried with a real camera.** The go2rtc route is tested against a fake camera only.
+- **WebRTC cameras are tried with one integration only.** Google Home Expanded's Nest cameras stream live; HomeKit Secure Video and other WebRTC integrations (Nest, Ring) haven't been tried.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
 - **Cameras have no talk-back.** HomeKit Secure Video hasn't been tried with a real home hub yet.
 - **Speakers have no volume in Home.** They're switches; HomeKit only has a volume control for TVs (and AirPlay speakers).

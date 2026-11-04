@@ -21,6 +21,7 @@ def describe_camera(
     night_vision: str | None = None,
     status_light: str | None = None,
     privacy: str | None = None,
+    video_profile: str | None = None,
 ) -> AccessorySpec:
     """A camera entity streamed to the Home app, as a video doorbell if `doorbell`
     (an event entity) is given, with an optional motion binary sensor. `audio`
@@ -39,6 +40,7 @@ def describe_camera(
         name, category="VIDEO_DOOR_BELL" if doorbell else "CAMERA", key=key, camera=camera
     )
     acc.camera_audio = audio
+    acc.camera_video_profile = video_profile
     acc.claim(camera)
     acc.available = lambda: ctx.available(camera)
     if doorbell is not None:
