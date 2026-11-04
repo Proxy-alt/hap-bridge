@@ -44,7 +44,33 @@ def test_plan_matches_by_serial_whatever_the_name():
         read.append(uuid)
         return details.get(uuid)
 
-    assignments, missing = assign_rooms.plan(wanted, home, detail)
+    assignments, missing, named = assign_rooms.plan(wanted, home, detail)
+    assert named == []
     assert assignments == [{"uuid": "U1", "room": "Office"}, {"uuid": "U3", "room": "Bedroom"}]
     assert [m["name"] for m in missing] == ["Gone"]
     assert "BR" not in read
+
+
+def test_unread_serial_is_none():
+    assert assign_rooms.serial_of(_detail("--")) is None
+    assert assign_rooms.serial_of(_detail("")) is None
+
+
+def test_plan_falls_back_to_a_unique_name_when_the_serial_is_unread():
+    bridge = {"name": "HAP Bridge"}
+    wanted = [
+        {"serial": "HB-K", "name": "Kitchen Display", "room": "Kitchen"},
+        {"serial": "HB-S", "name": "Speaker", "room": "Den"},
+        {"serial": "HB-D", "name": "Door", "room": "Hall"},
+    ]
+    home = [
+        {"id": "K", "name": "Kitchen Display", "bridge": bridge},
+        {"id": "S1", "name": "Speaker", "bridge": bridge},
+        {"id": "S2", "name": "Speaker", "bridge": bridge},  # ambiguous
+        {"id": "D", "name": "Door"},  # not bridged: never matched by name
+    ]
+    details = {uuid: _detail("--") for uuid in ("K", "S1", "S2", "D")}
+    assignments, missing, named = assign_rooms.plan(wanted, home, details.get)
+    assert assignments == [{"uuid": "K", "room": "Kitchen"}]
+    assert [m["name"] for m in named] == ["Kitchen Display"]
+    assert [m["name"] for m in missing] == ["Speaker", "Door"]
