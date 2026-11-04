@@ -32,6 +32,9 @@ class IdRegistry:
         }
         # standalone accessory key -> TCP port, so its HomeKit pairing keeps working
         self._ports: dict[str, int] = dict(data.get("ports", {}))
+        # bridged accessory key -> which bridge (0 = the main one) it's paired
+        # through; moving it to another bridge would drop it from the Home app.
+        self._bridges: dict[str, int] = dict(data.get("bridges", {}))
         self.dirty = False
 
     def aid(self, key: str) -> int:
@@ -68,11 +71,39 @@ class IdRegistry:
         self.dirty = True
         return port
 
+    def place(self, keys: list[str], capacity: int) -> dict[str, int]:
+        """Spread accessory keys over bridges of `capacity` accessories each.
+
+        A key stays on the bridge it was placed on before, as long as that bridge
+        has room; new keys fill the lowest bridge with room.
+        """
+        counts: dict[int, int] = {}
+        placed: dict[str, int] = {}
+        new: list[str] = []
+        for key in keys:
+            index = self._bridges.get(key)
+            if index is not None and counts.get(index, 0) < capacity:
+                placed[key] = index
+                counts[index] = counts.get(index, 0) + 1
+            else:
+                new.append(key)
+        for key in new:
+            index = 0
+            while counts.get(index, 0) >= capacity:
+                index += 1
+            placed[key] = index
+            counts[index] = counts.get(index, 0) + 1
+            if self._bridges.get(key) != index:
+                self._bridges[key] = index
+                self.dirty = True
+        return placed
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "aids": dict(self._aids),
             "iids": {a: dict(i) for a, i in self._iids.items()},
             "ports": dict(self._ports),
+            "bridges": dict(self._bridges),
         }
 
 

@@ -135,6 +135,14 @@ class Blocks:
         appliances.bind_valve(self._ctx, svc, self._entry(valve, "valve"))
         return svc
 
+    def irrigation(self, acc: AccessorySpec, zones: list[str]) -> ServiceSpec:
+        """A sprinkler system on `acc`: one Valve per zone (valve or switch entities)."""
+        if not zones:
+            raise ValueError("irrigation needs at least one zone")
+        for zone in zones:
+            self._entry(zone, "valve", "switch")
+        return appliances.bind_irrigation(self._ctx, acc, list(zones))
+
     # -- things that are switches ------------------------------------------------------------
 
     def vacuum(self, svc: ServiceSpec, vacuum: str) -> ServiceSpec:

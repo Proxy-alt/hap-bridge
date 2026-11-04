@@ -28,7 +28,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 import voluptuous as vol
 
-from . import issues
+from . import backup, issues
 from . import settings
 from .bridge import HapBridge
 from .const import DOMAIN, REGISTRY_RELOAD_COOLDOWN
@@ -143,6 +143,37 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         DOMAIN, "list_pairings", _list_pairings,
         schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),
         supports_response=SupportsResponse.ONLY,
+    )
+    async def _backup(call: ServiceCall) -> ServiceResponse:
+        entry = _preview_entry(hass, call.data.get("config_entry_id"))
+        return await backup.async_export(hass, entry)
+
+    async def _restore(call: ServiceCall) -> ServiceResponse:
+        entry_id = call.data["config_entry_id"]
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is None or entry.domain != DOMAIN:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="no_bridge")
+        try:
+            path = await hass.async_add_executor_job(backup.resolve, hass, call.data["file"])
+            units = await backup.async_restore(hass, entry, path)
+        except (FileNotFoundError, ValueError) as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="bad_backup",
+                translation_placeholders={"file": call.data["file"], "error": str(err)},
+            ) from err
+        return {"units": units}
+
+    hass.services.async_register(
+        DOMAIN, "backup", _backup,
+        schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN, "restore", _restore,
+        schema=vol.Schema({vol.Required("file"): cv.string,
+                           vol.Required("config_entry_id"): cv.string}),
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN, "remove_pairing", _remove_pairing,

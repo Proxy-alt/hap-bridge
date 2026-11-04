@@ -163,6 +163,8 @@ async def test_preview(hass, config_entry, purifier):
         "value": 1, "writable": True, "watches": [purifier.fan]}
     assert result["excluded"] == {purifier.rssi: "diagnostic entity"}
     assert result["problems"] == []
+    (home,) = result["home"]
+    assert home["tiles"][0]["kind"] == "Air Purifier"
 
     with _ship(_profile(broken)):
         result = await hass.services.async_call(

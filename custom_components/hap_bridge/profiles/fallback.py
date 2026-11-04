@@ -23,6 +23,10 @@ FAN_PRESET_MODE = 8
 COVER_SET_POSITION = 4
 COVER_SET_TILT_POSITION = 128
 CLIMATE_TARGET_TEMPERATURE_RANGE = 2
+MEDIA_PAUSE = 1
+MEDIA_TURN_ON = 128
+MEDIA_TURN_OFF = 256
+MEDIA_PLAY = 16384
 
 
 def describe_entity(ctx: HapContext, ent: RegistryEntry) -> None:
@@ -685,6 +689,60 @@ def _valve(ctx: HapContext, ent: RegistryEntry) -> None:
 def _media_player(ctx: HapContext, ent: RegistryEntry) -> None:
     if tv.is_tv(ent):
         tv.describe_tv(ctx, ent)
+    elif ent.supported_features & (MEDIA_TURN_ON | MEDIA_TURN_OFF | MEDIA_PLAY | MEDIA_PAUSE):
+        bind_speaker(ctx, _accessory(ctx, ent, "SWITCH").service("Switch", primary=True), ent)
+
+
+def bind_speaker(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """A speaker or other non-TV media player as a switch, like core HomeKit's
+    "on/off" and "play/pause" modes: power if it can turn on and off, else
+    playback. The Home app has no tile for volume outside TVs."""
+    eid = ent.entity_id
+    features = ent.supported_features
+    if features & MEDIA_TURN_ON and features & MEDIA_TURN_OFF:
+        svc.char(
+            "On", watch=[eid],
+            get=lambda: getattr(ctx.state(eid), "state", "off") not in ("off", "standby", ""),
+            set=lambda v: ctx.call("media_player", "turn_on" if v else "turn_off", eid),
+        )
+    else:
+        svc.char(
+            "On", watch=[eid],
+            get=lambda: getattr(ctx.state(eid), "state", "") == "playing",
+            set=lambda v: ctx.call("media_player", "media_play" if v else "media_pause", eid),
+        )
+
+
+def bind_occupancy(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
+    """A person or device tracker as an occupancy sensor: occupied while home."""
+    eid = ent.entity_id
+    svc.char("OccupancyDetected", watch=[eid],
+             get=lambda: int(getattr(ctx.state(eid), "state", "") == "home"))
+
+
+def bind_anyone_home(ctx: HapContext, svc: ServiceSpec, people: list[str]) -> None:
+    svc.char("OccupancyDetected", watch=people, get=lambda: int(any(
+        getattr(ctx.state(p), "state", "") == "home" for p in people)))
+
+
+def _weather(ctx: HapContext, ent: RegistryEntry) -> None:
+    """A weather entity's current temperature and humidity, for automations."""
+    eid = ent.entity_id
+    acc = _accessory(ctx, ent, "SENSOR")
+
+    def celsius() -> float | None:
+        value = ctx.attr(eid, "temperature")
+        if value is None:
+            return None
+        if ctx.attr(eid, "temperature_unit") == "°F":
+            value = (float(value) - 32) * 5 / 9
+        return round(float(value), 1)
+
+    temp = acc.service("TemperatureSensor", primary=True).char(
+        "CurrentTemperature", watch=[eid], get=celsius)
+    if ctx.attr(eid, "humidity") is not None:
+        acc.service("HumiditySensor", linked_to=temp).char(
+            "CurrentRelativeHumidity", watch=[eid], get=lambda: ctx.attr(eid, "humidity"))
 
 
 def _remote(ctx: HapContext, ent: RegistryEntry) -> None:
@@ -749,4 +807,8 @@ _BUILDERS: dict[str, Callable[[HapContext, RegistryEntry], None]] = {
     "media_player": _media_player,
     "remote": _remote,
     "camera": _camera,
+    "person": _simple("SENSOR", "OccupancySensor", bind_occupancy),
+    "device_tracker": _simple("SENSOR", "OccupancySensor", bind_occupancy),
+    "siren": _simple("SWITCH", "Switch", bind_on_off),
+    "weather": _weather,
 }

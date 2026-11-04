@@ -29,7 +29,7 @@ nothing touches HAP-python until the bridge validates and materializes them.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -305,6 +305,8 @@ class HapContext:
         self.settings = settings if settings is not None else Settings()
         self.accessories: list[AccessorySpec] = []
         self._claimed: set[str] = set()
+        # {alarm panel entity: code}, from the options flow.
+        self.alarm_codes: Mapping[str, str] = {}
         # Set by the bridge while each step runs; stamped onto new accessories.
         self.source = "unknown"
         self._blocks: Any = None

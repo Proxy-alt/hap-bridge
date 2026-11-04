@@ -111,6 +111,11 @@ def test_alarm_panel_offers_supported_modes(hass, loader):
     hass.states.set("alarm_control_panel.house", "triggered")
     assert svc.chars["SecuritySystemCurrentState"].get() == 4
 
+    # A code set in the options flow goes with every arm and disarm.
+    ctx.alarm_codes = {"alarm_control_panel.house": "1234"}
+    svc.chars["SecuritySystemTargetState"].set(1)
+    assert _calls(hass)[-1] == ("alarm_control_panel", "alarm_arm_away", {"code": "1234"})
+
 
 def test_valve_and_water_heater(hass, loader):
     ctx = _single(hass, loader, "valve.main", "opening",
@@ -211,3 +216,51 @@ def test_purifier_filter_change_and_reset(hass, loader):
     assert filt.chars["FilterChangeIndication"].get() == 1
     filt.chars["ResetFilterIndication"].set(1)
     assert _calls(hass)[-1] == ("button", "press", {})
+
+
+def test_sprinkler_controller_is_one_irrigation_system(hass, loader):
+    for eid, state in (("valve.yard_zone_10", "closed"), ("valve.yard_zone_2", "open"),
+                       ("valve.yard_zone_1", "closed")):
+        hass.states.set(eid, state)
+    entries = [make_entry(e, device_class="water") for e in
+               ("valve.yard_zone_10", "valve.yard_zone_2", "valve.yard_zone_1")]
+    ctx = HapContext(hass, make_device(), entries)
+    _run(ctx)
+    _assert_valid(ctx, loader)
+    assert len(ctx.accessories) == 1
+    acc = ctx.accessories[0]
+    assert acc.category == "SPRINKLER"
+    system = acc.services[0]
+    assert system.type_name == "IrrigationSystem" and system.primary
+    valves = [s for s in acc.services if s.type_name == "Valve"]
+    assert valves == system.linked
+    order = [v.chars["ServiceLabelIndex"].get() for v in valves]
+    names = [v.watched()[0] for v in valves]
+    assert names == ["valve.yard_zone_1", "valve.yard_zone_2", "valve.yard_zone_10"]
+    assert order == [1, 2, 3]
+    assert valves[0].chars["ValveType"].get() == 1
+    assert system.chars["InUse"].get() == 1
+
+    # The Home app's run time is remembered per zone.
+    assert valves[0].chars["SetDuration"].get() == appliances.DEFAULT_ZONE_DURATION
+    valves[0].chars["SetDuration"].set(120)
+    assert valves[0].chars["SetDuration"].get() == 120
+
+    valves[0].chars["Active"].set(1)
+    assert _calls(hass)[-1][:2] == ("valve", "open_valve")
+    asyncio.run(system.chars["Active"].set(0))
+    assert [c[1] for c in _calls(hass)[-3:]] == ["close_valve"] * 3
+
+
+def test_zone_switches_make_a_sprinkler(hass, loader):
+    entries = [make_entry(f"switch.rachio_zone_{n}") for n in (1, 2)]
+    entries.append(make_entry("switch.rachio_standby"))
+    for e in entries:
+        hass.states.set(e.entity_id, "off")
+    ctx = HapContext(hass, make_device(), entries)
+    _run(ctx)
+    _assert_valid(ctx, loader)
+    kinds = sorted(s.type_name for a in ctx.accessories for s in a.services)
+    assert kinds.count("Valve") == 2 and "IrrigationSystem" in kinds
+    # The standby switch isn't a zone; it stays a switch of its own.
+    assert "Switch" in kinds

@@ -12,6 +12,8 @@ CONF_NAMES = "names"
 CONF_CAMERA_AUDIO = "camera_audio"
 # Camera entities that record (HomeKit Secure Video) without a prebuffer.
 CONF_NO_PREBUFFER = "camera_no_prebuffer"
+# {alarm panel entity: code} sent when the Home app arms or disarms it.
+CONF_ALARM_CODES = "alarm_codes"
 
 DEFAULT_NAME = "HAP Bridge"
 DEFAULT_PORT = 21070

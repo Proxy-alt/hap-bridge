@@ -1,5 +1,5 @@
 """Binders for appliances and controls: AC units, humidifiers, alarms, valves,
-water heaters, vacuums and mowers, scenes/scripts/buttons, and selects.
+sprinklers, water heaters, vacuums and mowers, scenes/scripts/buttons, and selects.
 
 Mappings follow core HomeKit where it has one, so a device looks the same
 in the Home app either way. Like the binders in fallback.py these take a
@@ -276,8 +276,8 @@ _ALARM_SERVICES = {0: "alarm_arm_home", 1: "alarm_arm_away", 2: "alarm_arm_night
 def bind_security_system(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
     """Alarm panel as a SecuritySystem, offering only the arm modes it supports.
 
-    Panels that need a code to arm or disarm will refuse: the Home app has
-    nowhere to enter one.
+    The Home app has nowhere to enter a code, so panels that need one use
+    the code set for them in the options flow (`ctx.alarm_codes`).
     """
     eid = ent.entity_id
     features = ent.supported_features
@@ -295,7 +295,10 @@ def bind_security_system(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) 
         "SecuritySystemTargetState",
         watch=[eid],
         get=lambda: _ALARM_TARGET.get(_state(ctx, eid)),
-        set=lambda v: ctx.call("alarm_control_panel", _ALARM_SERVICES[v], eid),
+        set=lambda v: ctx.call(
+            "alarm_control_panel", _ALARM_SERVICES[v], eid,
+            **({"code": code} if (code := ctx.alarm_codes.get(eid)) else {}),
+        ),
         valid_values=dict(sorted(targets.items(), key=lambda kv: kv[1])),
     )
 
@@ -313,6 +316,105 @@ def bind_valve(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
     )
     svc.char("InUse", watch=[eid], get=lambda: int(_state(ctx, eid) == "open"))
     svc.char("ValveType", watch=[eid], get=lambda: 0)  # generic valve
+
+
+# -- sprinklers --------------------------------------------------------------------
+
+# Run time the Home app starts a zone for until someone picks another (seconds).
+DEFAULT_ZONE_DURATION = 600
+MAX_ZONE_DURATION = 3600
+
+
+def _zone_running(ctx: HapContext, eid: str) -> bool:
+    return _state(ctx, eid) in ("on", "open", "opening")
+
+
+def bind_irrigation(ctx: HapContext, acc: Any, zones: list[str]) -> Any:
+    """A sprinkler controller: an IrrigationSystem with one linked Valve per zone.
+
+    Zones are valve or switch entities. The Home app picks each zone's run
+    time (SetDuration, kept in settings); a zone it starts closes again once
+    that time is up, and RemainingDuration counts down meanwhile. Home
+    Assistant schedules aren't visible to HomeKit, so ProgramMode says none.
+    """
+    hass = ctx.hass
+    timers: dict[str, Any] = {}
+    ends: dict[str, float] = {}
+    # Zones seen running since the Home app started them; until a zone
+    # reports open, a closed state just means it hasn't started yet.
+    seen_running: set[str] = set()
+
+    def now() -> float:
+        return hass.loop.time() if getattr(hass, "loop", None) else 0.0
+
+    def turn(eid: str, on: bool) -> Any:
+        domain = eid.split(".")[0]
+        if domain == "valve":
+            return ctx.call("valve", "open_valve" if on else "close_valve", eid)
+        return ctx.call(domain, "turn_on" if on else "turn_off", eid)
+
+    def stop_timer(eid: str) -> None:
+        ends.pop(eid, None)
+        if (timer := timers.pop(eid, None)) is not None:
+            timer.cancel()
+
+    def duration(eid: str) -> int:
+        return int(ctx.settings.get(f"irrigation:{eid}:duration") or DEFAULT_ZONE_DURATION)
+
+    def set_zone(eid: str, value: int) -> Any:
+        stop_timer(eid)
+        seen_running.discard(eid)
+        if value and (loop := getattr(hass, "loop", None)) is not None:
+            seconds = duration(eid)
+            ends[eid] = now() + seconds
+
+            def _done() -> None:
+                timers.pop(eid, None)
+                ends.pop(eid, None)
+                hass.async_create_task(_run(turn(eid, False)), f"close {eid}")
+
+            timers[eid] = loop.call_later(seconds, _done)
+        return turn(eid, bool(value))
+
+    def remaining(eid: str) -> int:
+        if _zone_running(ctx, eid):
+            seen_running.add(eid)
+        elif eid in seen_running:
+            # Ran and then closed some other way: forget the Home app's run.
+            seen_running.discard(eid)
+            stop_timer(eid)
+            return 0
+        if (end := ends.get(eid)) is None:
+            return 0  # started outside HomeKit: no known end
+        return max(0, min(MAX_ZONE_DURATION, round(end - now())))
+
+    system = acc.service("IrrigationSystem", primary=True)
+    system.char("Active", watch=zones, get=lambda: 1,
+                set=lambda v: None if v else _run(*(set_zone(z, 0) for z in zones)))
+    system.char("ProgramMode", watch=zones, get=lambda: 0)  # no program scheduled
+    system.char("InUse", watch=zones, get=lambda: int(any(_zone_running(ctx, z) for z in zones)))
+    system.char("RemainingDuration", watch=zones,
+                get=lambda: max((remaining(z) for z in zones), default=0))
+    acc.service("ServiceLabel").char("ServiceLabelNamespace", watch=zones[:1], get=lambda: 1)
+
+    for index, eid in enumerate(zones, 1):
+        valve = acc.service("Valve", linked_to=system)
+        valve.char("Active", watch=[eid], get=lambda eid=eid: int(_zone_running(ctx, eid)),
+                   set=lambda v, eid=eid: set_zone(eid, v))
+        valve.char("InUse", watch=[eid], get=lambda eid=eid: int(_state(ctx, eid) in ("on", "open")))
+        valve.char("ValveType", watch=[eid], get=lambda: 1)  # irrigation
+        valve.char("IsConfigured", watch=[eid], get=lambda: 1)
+        valve.char("ServiceLabelIndex", watch=[eid], get=lambda index=index: index)
+        valve.char("Name", watch=[eid], get=lambda eid=eid: ctx.name_of(eid))
+        valve.char(
+            "SetDuration", watch=[eid],
+            get=lambda eid=eid: duration(eid),
+            set=lambda v, eid=eid: ctx.settings.set(f"irrigation:{eid}:duration", int(v)),
+            props={"maxValue": MAX_ZONE_DURATION},
+        )
+        valve.char("RemainingDuration", watch=[eid], get=lambda eid=eid: remaining(eid),
+                   props={"maxValue": MAX_ZONE_DURATION})
+    return system
 
 
 def bind_water_heater(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:

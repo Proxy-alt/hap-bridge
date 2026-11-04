@@ -64,3 +64,21 @@ def test_same_type_services_get_distinct_iids():
         acc.add_service(svc)
     iids = list(acc.iid_manager.iids.values())
     assert len(iids) == len(set(iids))
+
+
+def test_place_fills_bridges_and_keeps_accessories_where_they_were():
+    reg = IdRegistry()
+    placed = reg.place(["a", "b", "c", "d", "e"], capacity=2)
+    assert placed == {"a": 0, "b": 0, "c": 1, "d": 1, "e": 2}
+    assert reg.dirty
+
+    # "a" was removed: "e" stays on bridge 2 and the new "f" takes the free slot.
+    reloaded = IdRegistry(reg.as_dict())
+    placed = reloaded.place(["b", "c", "d", "e", "f"], capacity=2)
+    assert placed == {"b": 0, "c": 1, "d": 1, "e": 2, "f": 0}
+    assert IdRegistry(reloaded.as_dict()).place(["b", "c", "d", "e", "f"], 2) == placed
+
+
+def test_place_on_a_registry_from_before_splitting_keeps_order():
+    reg = IdRegistry({"aids": {"x": 2, "y": 3}})
+    assert reg.place(["x", "y"], capacity=149) == {"x": 0, "y": 0}

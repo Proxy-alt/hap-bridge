@@ -13,6 +13,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er, selector
 
 from .const import (
+    CONF_ALARM_CODES,
     CONF_CAMERA_AUDIO,
     CONF_EXCLUDE_DEVICES,
     CONF_EXCLUDE_ENTITIES,
@@ -66,7 +67,7 @@ class HapBridgeOptionsFlow(OptionsFlow):
         self._key: str | None = None
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(step_id="init", menu_options=["filters", "rename", "camera_audio"])
+        return self.async_show_menu(step_id="init", menu_options=["filters", "rename", "camera_audio", "alarm_codes"])
 
     def _save(self, **changes: Any) -> ConfigFlowResult:
         return self.async_create_entry(data={**self.config_entry.options, **changes})
@@ -194,5 +195,37 @@ class HapBridgeOptionsFlow(OptionsFlow):
                     cameras,
                 vol.Optional(CONF_NO_PREBUFFER, default=options.get(CONF_NO_PREBUFFER, [])):
                     cameras,
+            }),
+        )
+
+    async def async_step_alarm_codes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """A code per alarm panel, sent when the Home app arms or disarms it."""
+        panels = sorted(
+            state.entity_id for state in self.hass.states.async_all("alarm_control_panel")
+            if state.attributes.get("code_format") is not None
+            or state.attributes.get("code_arm_required")
+        )
+        if not panels:
+            return self.async_abort(reason="no_alarm_codes")
+        codes = dict(self.config_entry.options.get(CONF_ALARM_CODES) or {})
+        if user_input is not None:
+            for entity_id in panels:
+                if code := str(user_input.get(entity_id) or "").strip():
+                    codes[entity_id] = code
+                else:
+                    codes.pop(entity_id, None)
+            return self._save(**{CONF_ALARM_CODES: codes})
+        password = selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+        )
+        return self.async_show_form(
+            step_id="alarm_codes",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    entity_id, description={"suggested_value": codes.get(entity_id)}
+                ): password
+                for entity_id in panels
             }),
         )

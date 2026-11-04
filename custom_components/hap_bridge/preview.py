@@ -5,7 +5,8 @@ touching HomeKit IDs, pairing or running accessories, and returns:
 - every accessory: which step built it, its services and current values,
   and validation errors/warnings;
 - entities left out, and why;
-- problems with integrations' own profiles and with shims.
+- problems with integrations' own profiles and with shims;
+- `home`: the tiles each accessory becomes in the Home app (see home.py).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .api import AccessorySpec, Settings
+from .home import describe_home
 from .profiles import async_collect_specs
 from .shims import async_load_shims
 from .validate import validate_spec
@@ -36,7 +38,15 @@ async def async_preview(
         shims=await async_load_shims(hass),
     )
     loader = get_loader()
+
+    def name_of(entity_id: str) -> str:
+        state = hass.states.get(entity_id)
+        return str(state.attributes.get("friendly_name") or entity_id) if state else entity_id
+
     return {
+        "home": [
+            {"accessory": spec.name, **describe_home(spec, name_of)} for spec in collection.specs
+        ],
         "accessories": [describe(spec, loader) for spec in collection.specs],
         "excluded": dict(sorted(collection.excluded.items())),
         "problems": [

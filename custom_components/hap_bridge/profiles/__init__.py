@@ -32,6 +32,7 @@ from homeassistant.loader import async_get_integration
 
 from ..api import API_VERSION, AccessorySpec, HapContext, Settings
 from ..const import (
+    CONF_ALARM_CODES,
     CONF_CAMERA_AUDIO,
     CONF_EXCLUDE_DEVICES,
     CONF_EXCLUDE_ENTITIES,
@@ -104,6 +105,8 @@ async def async_collect_specs(
             contexts = [HapContext(hass, None, [e], settings) for e in entries]
         else:
             contexts = [HapContext(hass, dev_reg.async_get(dev_id), entries, settings)]
+        for ctx in contexts:
+            ctx.alarm_codes = entry.options.get(CONF_ALARM_CODES) or {}
 
         for ctx in contexts:
             if shims is not None:
@@ -132,9 +135,31 @@ async def async_collect_specs(
                 result.excluded[ent.entity_id] = fallback.why_not(ent)
             result.specs.extend(ctx.accessories)
 
+    if device_id is None and entity_id is None:
+        _anyone_home(hass, settings, by_device, result)
     apply_options(entry.options, result.specs)
     assign_serials(entry.entry_id, result.specs)
     return result
+
+
+def _anyone_home(
+    hass: HomeAssistant,
+    settings: Settings | None,
+    by_device: Mapping[str | None, list[er.RegistryEntry]],
+    result: Collection,
+) -> None:
+    """With two or more people, an "Anyone Home" occupancy sensor for automations."""
+    people = [e for entries in by_device.values() for e in entries if e.domain == "person"]
+    if len(people) < 2:
+        return
+    ctx = HapContext(hass, None, people, settings)
+    ctx.source = "profile:anyone_home"
+    acc = ctx.accessory("Anyone Home", category="SENSOR", key="anyone_home")
+    fallback.bind_anyone_home(
+        ctx, acc.service("OccupancySensor", primary=True, unique_id="anyone_home"),
+        sorted(e.entity_id for e in people),
+    )
+    result.specs.extend(ctx.accessories)
 
 
 def serial_number(entry_id: str, key: str) -> str:

@@ -32,6 +32,10 @@ For each device, in order, each step seeing only what earlier steps left:
    - air quality: all of a device's pollutant sensors in one tile, rated by
      the worst
    - multi-button remotes: one accessory with a numbered switch per button
+   - sprinkler controllers (two or more water valves, or switches named
+     zone/station/sprinkler): one Sprinkler with a valve per zone. Each zone
+     keeps the run time picked in the Home app; a zone started from Home
+     closes again when it's up, with a countdown meanwhile.
 3. **Fallback**: per-entity mapping similar to core HomeKit Bridge:
    - lights, with brightness, hue/saturation and color temperature, plus
      Adaptive Lighting for lights with color temperature (see below)
@@ -46,8 +50,14 @@ For each device, in order, each step seeing only what earlier steps left:
      core HomeKit) as heater/coolers, everything else as thermostats
    - humidifiers and dehumidifiers
    - alarm panels as security systems, offering only the arm modes they
-     support. Panels that need a code can't be armed or disarmed from Home,
-     which has nowhere to enter one.
+     support. The Home app has nowhere to enter a code, so for panels that
+     need one, set it under **Alarm codes** in the options.
+   - people and device trackers as occupancy sensors (occupied while home),
+     plus an **Anyone Home** sensor once there are two or more people
+   - sirens as switches
+   - weather entities as temperature (and humidity) sensors, for automations
+   - speakers and other media players that aren't TVs as switches: power if
+     they can turn on and off, otherwise play/pause
    - valves, and water heaters as heat-only thermostats
    - vacuums and lawn mowers as switches: on starts, off sends them home
    - scenes and buttons as switches that turn themselves back off; scripts
@@ -111,6 +121,7 @@ wrong service or entity and it raises an error saying what to fix.
 | `garage_door` | GarageDoorOpener |
 | `security_system` | SecuritySystem |
 | `valve` | Valve |
+| `irrigation(acc, zones)` (valve or switch entities) | IrrigationSystem + a Valve per zone |
 | `vacuum`, `lawn_mower`, `momentary` | Switch |
 | `doorbell`, `button` | Doorbell / StatelessProgrammableSwitch |
 | `sensor` (any sensor or binary sensor HomeKit has a service for) | see `sensor_service_type` |
@@ -157,7 +168,10 @@ HAP-python's catalogue (`scripts/gen_hap.py`). For example
     `profile:<name>` or `fallback`), its services and current values, and
     validation errors or warnings;
   - entities left out, and why;
-  - problems with your profile.
+  - problems with your profile;
+  - `home`: what the Home app will show, i.e. each tile's name, kind
+    ("Air Purifier", "Sprinkler") and state, plus what's folded into its
+    details (a filter, zones, a battery).
 
   Nothing is paired or changed, and there's no restart needed between edits.
 - **Repair issues.** If your profile raises, can't be imported, builds an
@@ -455,7 +469,7 @@ Devices & services, then pair by scanning the QR code in the notification (or
 typing its code). The bridge's **Reset pairing** button removes every paired
 Home app so you can add it again.
 
-The options have three parts:
+The options have four parts:
 
 - **What to expose:** only some integrations or entity domains, minus
   excluded devices and entities.
@@ -466,6 +480,9 @@ The options have three parts:
   original as `default_name`.
 - **Cameras:** which cameras send sound, and which record without a
   prebuffer (see above).
+- **Alarm codes:** a code for each alarm panel that needs one, sent when the
+  Home app arms or disarms it. Anyone who controls the alarm in your Home
+  can then arm and disarm it.
 
 Adding, removing or renaming devices and entities in Home Assistant rebuilds
 the bridge after 30 seconds of quiet.
@@ -482,6 +499,20 @@ controllers paired with the bridge and with each TV and camera, and which
 are admins. `hap_bridge.remove_pairing` removes one, for example a phone you
 no longer have, without resetting everything. When the last one goes, the
 pairing code shows again.
+
+**More than 149 accessories:** a HAP bridge holds at most 149. Past that, the
+rest go on a second bridge ("HAP Bridge 2", then 3, ...), each with its own
+pairing code, notification and Reset pairing button. Each accessory stays
+on the bridge it was first put on, so removing devices never moves the others
+between bridges (which would drop them from the Home app).
+
+**Backup and restore:** `hap_bridge.backup` saves a bridge's HomeKit identity
+(pairing keys, paired controllers, accessory IDs, Home app tile names) and its
+options to `hap_bridge_backups/` in your config folder. If you delete and
+re-add the bridge, `hap_bridge.restore` with that file puts it all back, and
+the Home app finds every accessory with its rooms and automations without
+pairing again. The file holds the bridge's private keys, so keep it as safe as
+a password. Home Assistant's own backups already include it.
 
 **Other details:**
 
@@ -513,9 +544,8 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 ## Not done yet
 
 - **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
-- **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
 - **Cameras have no talk-back.** HomeKit Secure Video hasn't been tried with a real home hub yet.
-- **Plain speakers aren't exposed.** HomeKit has no useful service for them (only AirPlay speakers show up properly).
+- **Speakers have no volume in Home.** They're switches; HomeKit only has a volume control for TVs (and AirPlay speakers).
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
 - **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.

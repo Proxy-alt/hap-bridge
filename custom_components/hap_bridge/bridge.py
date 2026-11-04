@@ -1,8 +1,8 @@
 """Turns accessory specs into running HomeKit accessories.
 
-One config entry runs one HAP bridge for most accessories, plus one HAP
-server per standalone accessory (TVs, cameras): HomeKit expects those to be
-paired on their own. Each of these "units" has its own port, pairing code
+One config entry runs one HAP bridge for most accessories (more once it holds
+over 149: HomeKit's limit per bridge), plus one HAP server per standalone
+accessory (TVs, cameras): HomeKit expects those to be paired on their own. Each of these "units" has its own port, pairing code
 and pairing state; they share IDs, bindings and Home Assistant listeners.
 """
 
@@ -57,7 +57,7 @@ SIGNAL_UNITS = f"{DOMAIN}_units_{{}}"
 
 @dataclass
 class Unit:
-    """One HAP server: the bridge, or one standalone accessory."""
+    """One HAP server: a bridge, or one standalone accessory."""
 
     id: str
     name: str
@@ -135,15 +135,8 @@ class HapBridge:
         self._settings = settings
         zc = await zeroconf.async_get_async_instance(self.hass)
 
-        bridge_unit = await self._async_new_unit(
-            self.entry.entry_id, self.entry.data[CONF_NAME], self.entry.data[CONF_PORT], zc
-        )
-        bridge = Bridge(
-            bridge_unit.driver,
-            bridge_unit.name,
-            iid_manager=StableIIDManager(self._registry, BRIDGE_AID),
-        )
-        bridge_unit.root = bridge
+        bridge_unit = await self._async_new_bridge(0, zc)
+        bridge = bridge_unit.root
 
         collection = await async_collect_specs(
             self.hass, self.entry, settings, shims=await async_load_shims(self.hass)
@@ -151,6 +144,7 @@ class HapBridge:
         self.excluded = collection.excluded
         self.problems = collection.problems
         standalone: list[AccessorySpec] = []
+        bridged: list[AccessorySpec] = []
         seen_keys: set[str] = set()
         for spec in collection.specs:
             # The key decides the AID; a second accessory with the same key would
@@ -173,17 +167,23 @@ class HapBridge:
             if spec.standalone:
                 standalone.append(spec)
                 continue
-            if len(bridge_unit.accessories) >= MAX_BRIDGED_ACCESSORIES:
-                _LOGGER.warning(
-                    "Bridge is full (%s accessories); skipping %s",
-                    MAX_BRIDGED_ACCESSORIES, spec.name,
-                )
-                continue
-            acc = self._materialize(spec, bridge_unit.driver, self._registry.aid(spec.key))
-            bridge.add_accessory(acc)
-            bridge_unit.accessories.append((spec, acc))
-        bridge_unit.driver.add_accessory(bridge)
-        self.units[bridge_unit.id] = bridge_unit
+            bridged.append(spec)
+
+        # A HAP bridge holds at most 149 accessories; the rest spill over onto
+        # more bridges, each paired on its own. Accessories stay where they were.
+        placement = self._registry.place([s.key for s in bridged], MAX_BRIDGED_ACCESSORIES)
+        bridges = {0: bridge_unit}
+        for spec in bridged:
+            index = placement[spec.key]
+            if (unit := bridges.get(index)) is None:
+                unit = bridges[index] = await self._async_new_bridge(index, zc)
+            acc = self._materialize(spec, unit.driver, self._registry.aid(spec.key))
+            unit.root.add_accessory(acc)
+            unit.accessories.append((spec, acc))
+        for index in sorted(bridges):
+            unit = bridges[index]
+            unit.driver.add_accessory(unit.root)
+            self.units[unit.id] = unit
 
         for spec in standalone:
             unit_id = f"{self.entry.entry_id}_{hashlib.sha1(spec.key.encode()).hexdigest()[:10]}"
@@ -219,11 +219,25 @@ class HapBridge:
         for key, adaptive in self._adaptive:
             adaptive.async_start(self._adaptive_saved.get(key))
         _LOGGER.info(
-            "HAP bridge %s started with %s accessories and %s standalone",
-            bridge.display_name, len(bridge_unit.accessories), len(standalone),
+            "HAP bridge %s started with %s accessories on %s bridge(s) and %s standalone",
+            bridge.display_name, len(bridged), len(bridges), len(standalone),
         )
         issues.async_update_profile_issues(self.hass, self.entry, self.problems)
         async_dispatcher_send(self.hass, SIGNAL_UNITS.format(self.entry.entry_id))
+
+    async def _async_new_bridge(self, index: int, zc: Any) -> Unit:
+        """The main bridge (index 0) or an overflow bridge, with its Bridge root."""
+        name = self.entry.data[CONF_NAME]
+        if index == 0:
+            unit_id, port = self.entry.entry_id, self.entry.data[CONF_PORT]
+        else:
+            unit_id, name = f"{self.entry.entry_id}_bridge{index + 1}", f"{name} {index + 1}"
+            port = self._registry.port(f"bridge:{index}", _port_free, self.entry.data[CONF_PORT] + 1)
+        unit = await self._async_new_unit(unit_id, name, port, zc)
+        unit.root = Bridge(
+            unit.driver, unit.name, iid_manager=StableIIDManager(self._registry, BRIDGE_AID)
+        )
+        return unit
 
     async def _async_new_unit(self, unit_id: str, name: str, port: int, zc: Any) -> Unit:
         driver = await self.hass.async_add_executor_job(

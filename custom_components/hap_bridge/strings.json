@@ -16,7 +16,8 @@
         "menu_options": {
           "filters": "What to expose",
           "rename": "Rename an accessory",
-          "camera_audio": "Cameras"
+          "camera_audio": "Cameras",
+          "alarm_codes": "Alarm codes"
         }
       },
       "rename": {
@@ -37,6 +38,10 @@
           "camera_no_prebuffer": "Cameras that record without a prebuffer"
         }
       },
+      "alarm_codes": {
+        "title": "Alarm codes",
+        "description": "These alarm panels need a code to arm or disarm, and the Home app has nowhere to enter one. Set a code here and HAP Bridge sends it for you. Anyone who can control the alarm in your Home app can then arm and disarm it. Leave a code empty to remove it."
+      },
       "filters": {
         "title": "What to expose",
         "data": {
@@ -51,7 +56,8 @@
       "invalid_name": "Use letters, digits, spaces and ' . , & -, starting and ending with a letter or digit."
     },
     "abort": {
-      "not_running": "The bridge isn't running, so there are no accessories to rename yet."
+      "not_running": "The bridge isn't running, so there are no accessories to rename yet.",
+      "no_alarm_codes": "None of your alarm panels needs a code."
     }
   },
   "issues": {
@@ -115,6 +121,21 @@
         "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: any)." }
       }
     },
+    "backup": {
+      "name": "Back up pairings",
+      "description": "Saves a bridge's HomeKit identity (pairing keys, paired controllers, accessory IDs) and its options to a file in hap_bridge_backups/ in your config folder. Restore it into a re-added bridge and the Home app keeps every accessory, room and automation. The file holds private keys: keep it as safe as a password.",
+      "fields": {
+        "config_entry_id": { "name": "Bridge", "description": "Which bridge (default: the first)." }
+      }
+    },
+    "restore": {
+      "name": "Restore pairings",
+      "description": "Replaces a bridge's HomeKit identity and options with a backup's, then restarts it. Its current pairings are lost. Turn off the bridge the backup came from first, if it's still running: two bridges with one identity confuse the Home app.",
+      "fields": {
+        "file": { "name": "Backup file", "description": "The file Back up pairings saved, e.g. hap_bridge_backups/hap_bridge_20261103_120000.json (or just its name)." },
+        "config_entry_id": { "name": "Bridge", "description": "The bridge to restore into." }
+      }
+    },
     "preview": {
       "name": "Preview",
       "description": "Shows what HomeKit would get for a device or entity: accessories, services, current values, which step built them, validation problems, and what's left out and why. Nothing is paired or changed.",
@@ -130,6 +151,7 @@
     "no_accessory": { "message": "No bridge has an accessory with serial number {serial}." },
     "not_a_setting": { "message": "{entity_id} isn't one of {name}'s settings." },
     "setting_needs_value": { "message": "Setting {entity_id} needs a value." },
-    "no_pairing": { "message": "No bridge has a controller paired with ID {pairing_id}." }
+    "no_pairing": { "message": "No bridge has a controller paired with ID {pairing_id}." },
+    "bad_backup": { "message": "Can't restore {file}: {error}" }
   }
 }

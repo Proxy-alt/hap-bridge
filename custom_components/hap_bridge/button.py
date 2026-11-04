@@ -1,4 +1,5 @@
-""""Reset pairing" buttons: one for the bridge, one per standalone accessory."""
+""""Reset pairing" buttons: one for the bridge, one per overflow
+bridge and standalone accessory."""
 
 from __future__ import annotations
 
@@ -23,20 +24,21 @@ async def async_setup_entry(
     added: set[str] = set()
 
     @callback
-    def _add_standalone() -> None:
-        # The bridge only knows its standalone accessories (TVs, cameras) once started.
+    def _add_units() -> None:
+        # The bridge only knows its standalone accessories (TVs, cameras) and
+        # overflow bridges once started.
         new = [
             ResetPairingButton(entry, unit.id, unit.name)
             for unit in entry.runtime_data.units.values()
-            if unit.standalone and unit.id not in added
+            if unit.id != entry.entry_id and unit.id not in added
         ]
         added.update(button.unit_id for button in new)
         async_add_entities(new)
 
     entry.async_on_unload(
-        async_dispatcher_connect(hass, SIGNAL_UNITS.format(entry.entry_id), _add_standalone)
+        async_dispatcher_connect(hass, SIGNAL_UNITS.format(entry.entry_id), _add_units)
     )
-    _add_standalone()
+    _add_units()
 
 
 class ResetPairingButton(ButtonEntity):

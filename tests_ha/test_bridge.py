@@ -2,6 +2,8 @@ from datetime import timedelta
 from unittest.mock import patch
 from uuid import uuid4
 
+import pytest
+
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
@@ -11,6 +13,7 @@ from pytest_homeassistant_custom_component.common import (
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.util import dt as dt_util
 
@@ -343,3 +346,160 @@ async def test_appliances_materialize(hass, config_entry, caplog):
     (select,) = (a for spec, a in bridge._accessories if ids["select"] in spec.services[0].watched())
     names = [s.get_characteristic("Name").value for s in select.services if s.display_name == "Switch"]
     assert names == ["Home", "Away"]
+
+
+async def test_accessories_past_the_limit_go_to_another_bridge(hass, config_entry):
+    source = MockConfigEntry(domain="acme")
+    source.add_to_hass(hass)
+    lights = []
+    for n in range(3):
+        device = dr.async_get(hass).async_get_or_create(
+            config_entry_id=source.entry_id, identifiers={("acme", f"l{n}")}, name=f"Lamp {n}")
+        ent = er.async_get(hass).async_get_or_create(
+            "light", "acme", f"l{n}", device_id=device.id, original_name=f"Lamp {n}",
+            capabilities={"supported_color_modes": ["onoff"]})
+        hass.states.async_set(ent.entity_id, "on")
+        lights.append(ent.entity_id)
+
+    with patch("custom_components.hap_bridge.bridge.MAX_BRIDGED_ACCESSORIES", 2):
+        bridge = await _setup(hass, config_entry)
+        overflow = f"{config_entry.entry_id}_bridge2"
+        assert set(bridge.units) == {config_entry.entry_id, overflow}
+        assert len(bridge.units[config_entry.entry_id].accessories) == 2
+        moved = bridge.units[overflow].accessories[0][0].key
+        assert bridge.units[overflow].name == "Test Bridge 2"
+        assert bridge.units[overflow].driver.state.port != 21099
+        # Its own pairing code and reset button.
+        notes = persistent_notification._async_get_or_create_notifications(hass)
+        assert f"{DOMAIN}_{overflow}_pairing" in notes
+        assert er.async_get(hass).async_get_entity_id(
+            "button", DOMAIN, f"{overflow}_reset_pairing")
+
+        # After a reload the accessory is still on the second bridge.
+        await hass.config_entries.async_reload(config_entry.entry_id)
+        await hass.async_block_till_done()
+        bridge = config_entry.runtime_data
+        assert [s.key for s, _a in bridge.units[overflow].accessories] == [moved]
+
+
+async def test_alarm_codes_option(hass, config_entry):
+    hass.states.async_set("alarm_control_panel.house", "disarmed", {"code_format": "number"})
+    hass.states.async_set("alarm_control_panel.open", "disarmed", {"code_format": None})
+    await _setup(hass, config_entry)
+    result = await _options_step(hass, config_entry, "alarm_codes")
+    assert list(result["data_schema"].schema) == ["alarm_control_panel.house"]
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"alarm_control_panel.house": " 1234 "})
+    await hass.async_block_till_done()
+    assert config_entry.options["alarm_codes"] == {"alarm_control_panel.house": "1234"}
+
+    result = await _options_step(hass, config_entry, "alarm_codes")
+    await hass.config_entries.options.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert config_entry.options["alarm_codes"] == {}
+
+
+async def test_sprinkler_zone_closes_after_its_run_time(hass, config_entry):
+    source = MockConfigEntry(domain="acme")
+    source.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=source.entry_id, identifiers={("acme", "yard")}, name="Yard")
+    zones = []
+    for n in (1, 2):
+        ent = er.async_get(hass).async_get_or_create(
+            "valve", "acme", f"z{n}", device_id=device.id, original_name=f"Zone {n}",
+            original_device_class="water")
+        hass.states.async_set(ent.entity_id, "closed")
+        zones.append(ent.entity_id)
+    opened = async_mock_service(hass, "valve", "open_valve")
+    closed = async_mock_service(hass, "valve", "close_valve")
+    bridge = await _setup(hass, config_entry)
+
+    acc = next(acc for spec, acc in bridge._accessories if spec.category == "SPRINKLER")
+    valve = next(s for s in acc.services if s.display_name == "Valve"
+                 and s.get_characteristic("ServiceLabelIndex").value == 1)
+    valve.get_characteristic("SetDuration").client_update_value(60)
+    valve.get_characteristic("Active").client_update_value(1)
+    await hass.async_block_till_done()
+    assert opened and opened[0].data["entity_id"] == zones[0]
+    hass.states.async_set(zones[0], "open")
+    await hass.async_block_till_done()
+    assert 0 < valve.get_characteristic("RemainingDuration").value <= 60
+
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
+    await hass.async_block_till_done()
+    assert closed and closed[0].data["entity_id"] == zones[0]
+
+    # Started again, then closed from Home Assistant: the run is forgotten.
+    valve.get_characteristic("Active").client_update_value(1)
+    await hass.async_block_till_done()
+    hass.states.async_set(zones[0], "open")
+    await hass.async_block_till_done()
+    hass.states.async_set(zones[0], "closed")
+    await hass.async_block_till_done()
+    assert valve.get_characteristic("RemainingDuration").value == 0
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=200))
+    await hass.async_block_till_done()
+    assert len(closed) == 1
+
+
+async def test_anyone_home_with_two_people(hass, config_entry):
+    people = []
+    for name in ("alex", "sam"):
+        ent = er.async_get(hass).async_get_or_create("person", "person", name)
+        hass.states.async_set(ent.entity_id, "not_home")
+        people.append(ent.entity_id)
+    bridge = await _setup(hass, config_entry)
+    anyone = next(a for a in bridge.diagnostics()["accessories"] if a["name"] == "Anyone Home")
+    assert sorted(anyone["watches"]) == people
+    acc = next(acc for spec, acc in bridge._accessories if spec.key == "anyone_home")
+    char = acc.get_service("OccupancySensor").get_characteristic("OccupancyDetected")
+    assert char.value == 0
+    hass.states.async_set(people[1], "home")
+    await hass.async_block_till_done()
+    assert char.value == 1
+
+
+async def test_backup_and_restore_into_a_new_bridge(hass, config_entry, lamp, tmp_path):
+    from pyhap.accessory_driver import AccessoryDriver
+
+    from homeassistant.const import CONF_NAME, CONF_PORT
+
+    hass.config.config_dir = str(tmp_path)
+    (tmp_path / ".storage").mkdir()
+
+    hass.config_entries.async_update_entry(config_entry, options={"names": {"x": "Y"}})
+    old = await _setup(hass, config_entry)
+    old._driver.state.add_paired_client(str(uuid4()).encode(), b"k" * 32, b"\x01")
+    await hass.async_add_executor_job(AccessoryDriver.persist, old._driver)
+    old_mac, old_aid = old._driver.state.mac, _hap_accessory(old, lamp).aid
+
+    result = await hass.services.async_call(
+        DOMAIN, "backup", {"config_entry_id": config_entry.entry_id},
+        blocking=True, return_response=True)
+    assert result["units"] == 1 and result["path"].startswith("hap_bridge_backups/")
+
+    # The bridge is removed and added again: a new entry, a new identity.
+    new_entry = MockConfigEntry(
+        domain=DOMAIN, title="New", data={CONF_NAME: "New", CONF_PORT: 21199})
+    new_entry.add_to_hass(hass)
+    await hass.config_entries.async_unload(config_entry.entry_id)
+    new = await _setup(hass, new_entry)
+    assert new._driver.state.mac != old_mac
+
+    await hass.services.async_call(
+        DOMAIN, "restore", {"config_entry_id": new_entry.entry_id,
+                            "file": result["path"].split("/")[-1]},
+        blocking=True, return_response=True)
+    await hass.async_block_till_done()
+    new = new_entry.runtime_data
+    assert new._driver.state.mac == old_mac
+    assert len(new._driver.state.paired_clients) == 1
+    assert _hap_accessory(new, lamp).aid == old_aid
+    assert new_entry.options == {"names": {"x": "Y"}}
+
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN, "restore", {"config_entry_id": new_entry.entry_id,
+                                "file": "../../etc/passwd"}, blocking=True)
+    await hass.config_entries.async_unload(new_entry.entry_id)

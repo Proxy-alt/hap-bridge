@@ -9,6 +9,7 @@ specific integration's entity layout, keyed by integration domain.
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 
 from ..api import HapContext
 from . import appliances, cameras, tv
@@ -239,6 +240,29 @@ def buttons(ctx: HapContext) -> None:
 
 
 
+def _is_zone_switch(ent) -> bool:
+    text = f"{ent.translation_key or ''} {ent.entity_id}".lower()
+    return any(word in text for word in ("zone", "sprinkler", "station"))
+
+
+def sprinkler(ctx: HapContext) -> None:
+    """A sprinkler controller: two or more water valves, or zone switches, as
+    one IrrigationSystem with a valve per zone."""
+    if ctx.device is None:
+        return
+    zones = ctx.entities(
+        "valve", predicate=lambda e: (e.device_class or e.original_device_class) in (None, "water")
+    )
+    if len(zones) < 2:
+        zones = ctx.entities("switch", predicate=_is_zone_switch)
+    if len(zones) < 2:
+        return
+    # Zone 2 before zone 10: the Home app lists zones by ServiceLabelIndex.
+    zones.sort(key=lambda eid: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", eid)])
+    acc = ctx.accessory(category="SPRINKLER")
+    appliances.bind_irrigation(ctx, acc, zones)
+
+
 # Sensor services that carry StatusLowBattery / StatusTampered / StatusFault.
 _STATUS_SERVICES = {
     "AirQualitySensor", "CarbonDioxideSensor", "CarbonMonoxideSensor", "ContactSensor",
@@ -296,7 +320,7 @@ Profile = Callable[[HapContext], None]
 PROFILES: list[Profile] = [
     camera, television, activity_remote,
     air_purifier, fan_with_light, thermostat, humidifier, doorbell, garage_door,
-    air_quality_sensor, buttons,
+    air_quality_sensor, buttons, sprinkler,
 ]
 
 def adaptive_lighting(ctx: HapContext) -> None:
