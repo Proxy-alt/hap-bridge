@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -12,10 +13,12 @@ from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er, selector
 
 from .const import (
+    CONF_CAMERA_AUDIO,
     CONF_EXCLUDE_DEVICES,
     CONF_EXCLUDE_ENTITIES,
     CONF_INCLUDE_DOMAINS,
     CONF_INCLUDE_INTEGRATIONS,
+    CONF_NAMES,
     DEFAULT_NAME,
     DEFAULT_PORT,
     DOMAIN,
@@ -52,10 +55,26 @@ class HapBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
         return HapBridgeOptionsFlow()
 
 
+# HomeKit names: letters, digits, spaces and a little punctuation, starting
+# and ending with a letter or digit. The Home app rejects anything else.
+_VALID_NAME = re.compile(r"^[\w](?:[\w '.,&-]*[\w])?$")
+
+
 class HapBridgeOptionsFlow(OptionsFlow):
+    def __init__(self) -> None:
+        self._key: str | None = None
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="init", menu_options=["filters", "rename", "camera_audio"])
+
+    def _save(self, **changes: Any) -> ConfigFlowResult:
+        return self.async_create_entry(data={**self.config_entry.options, **changes})
+
+    async def async_step_filters(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            return self._save(**user_input)
 
         entities = [
             e for e in er.async_get(self.hass).entities.values() if e.platform != DOMAIN
@@ -72,7 +91,7 @@ class HapBridgeOptionsFlow(OptionsFlow):
             )
 
         return self.async_show_form(
-            step_id="init",
+            step_id="filters",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -93,4 +112,81 @@ class HapBridgeOptionsFlow(OptionsFlow):
                     ): selector.EntitySelector(selector.EntitySelectorConfig(multiple=True)),
                 }
             ),
+        )
+
+    def _accessories(self) -> dict[str, tuple[str, str]]:
+        """{key: (name now, name the profile gave)} for the running bridge."""
+        bridge = getattr(self.config_entry, "runtime_data", None)
+        if bridge is None:
+            return {}
+        return {
+            spec.key: (spec.name, spec.default_name) for spec, _acc in bridge.accessories()
+        }
+
+    async def async_step_rename(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        accessories = self._accessories()
+        if not accessories:
+            return self.async_abort(reason="not_running")
+        if user_input is not None:
+            self._key = user_input["accessory"]
+            return await self.async_step_rename_accessory()
+        names = self.config_entry.options.get(CONF_NAMES) or {}
+        choices = [
+            selector.SelectOptionDict(
+                value=key,
+                label=f"{now} (was {default})" if key in names else now,
+            )
+            for key, (now, default) in sorted(accessories.items(), key=lambda kv: kv[1][0].lower())
+        ]
+        return self.async_show_form(
+            step_id="rename",
+            data_schema=vol.Schema({
+                vol.Required("accessory"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=choices, mode=selector.SelectSelectorMode.DROPDOWN
+                    )
+                ),
+            }),
+        )
+
+    async def async_step_rename_accessory(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        assert self._key is not None
+        now, default = self._accessories().get(self._key, ("", ""))
+        names = dict(self.config_entry.options.get(CONF_NAMES) or {})
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            name = " ".join(user_input.get(CONF_NAME, "").split())
+            if not name or name == default:
+                names.pop(self._key, None)
+                return self._save(**{CONF_NAMES: names})
+            if _VALID_NAME.match(name):
+                names[self._key] = name
+                return self._save(**{CONF_NAMES: names})
+            errors[CONF_NAME] = "invalid_name"
+        return self.async_show_form(
+            step_id="rename_accessory",
+            data_schema=vol.Schema({vol.Optional(CONF_NAME, default=now): str}),
+            description_placeholders={"default": default},
+            errors=errors,
+        )
+
+    async def async_step_camera_audio(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self._save(**{CONF_CAMERA_AUDIO: user_input.get(CONF_CAMERA_AUDIO, [])})
+        return self.async_show_form(
+            step_id="camera_audio",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_CAMERA_AUDIO,
+                    default=self.config_entry.options.get(CONF_CAMERA_AUDIO, []),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="camera", multiple=True)
+                ),
+            }),
         )

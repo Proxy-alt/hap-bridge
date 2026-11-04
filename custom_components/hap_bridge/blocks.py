@@ -244,10 +244,20 @@ class Blocks:
         return acc
 
     def camera(
-        self, camera: str, *, doorbell: str | None = None, motion: str | None = None
+        self,
+        camera: str,
+        *,
+        doorbell: str | None = None,
+        motion: str | None = None,
+        audio: bool = False,
     ) -> AccessorySpec:
-        """A standalone camera (live video, snapshots); a video doorbell with `doorbell`."""
+        """A standalone camera (live video, snapshots); a video doorbell with `doorbell`.
+
+        `audio=True` sends the stream's sound too; only for streams with audio.
+        """
         self._entry(camera, "camera")
         if doorbell is not None:
             self._entry(doorbell, "event")
-        return cameras.describe_camera(self._ctx, camera, doorbell=doorbell, motion=motion)
+        return cameras.describe_camera(
+            self._ctx, camera, doorbell=doorbell, motion=motion, audio=audio
+        )

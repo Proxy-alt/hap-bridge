@@ -101,6 +101,10 @@ class HapBridge:
     def _bridge_unit(self) -> Unit | None:
         return self.units.get(self.entry.entry_id)
 
+    def accessories(self) -> list[tuple[AccessorySpec, Accessory]]:
+        """Every published accessory, on the bridge or standalone."""
+        return list(self._accessories)
+
     # Kept for diagnostics and tests: the bridge's own driver and accessories.
     @property
     def _driver(self) -> _Driver | None:

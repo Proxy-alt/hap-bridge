@@ -12,6 +12,29 @@
   "options": {
     "step": {
       "init": {
+        "title": "HAP Bridge options",
+        "menu_options": {
+          "filters": "What to expose",
+          "rename": "Rename an accessory",
+          "camera_audio": "Camera audio"
+        }
+      },
+      "rename": {
+        "title": "Rename an accessory",
+        "description": "Choose the accessory to rename. HomeKit uses this name when the accessory is first added; the Home app keeps its own name after that, so rename already-added accessories there.",
+        "data": { "accessory": "Accessory" }
+      },
+      "rename_accessory": {
+        "title": "Rename an accessory",
+        "description": "Its own name is {default}. Leave this empty to go back to it.",
+        "data": { "name": "Name in HomeKit" }
+      },
+      "camera_audio": {
+        "title": "Camera audio",
+        "description": "Send these cameras' sound to the Home app along with the video. Only choose cameras whose stream has audio: for one without, the video won't play either. Talking back through the camera isn't supported.",
+        "data": { "camera_audio": "Cameras with audio" }
+      },
+      "filters": {
         "title": "What to expose",
         "data": {
           "include_integrations": "Only expose devices from these integrations (empty = all)",
@@ -20,6 +43,12 @@
           "exclude_entities": "Never expose these entities"
         }
       }
+    },
+    "error": {
+      "invalid_name": "Use letters, digits, spaces and ' . , & -, starting and ending with a letter or digit."
+    },
+    "abort": {
+      "not_running": "The bridge isn't running, so there are no accessories to rename yet."
     }
   },
   "issues": {

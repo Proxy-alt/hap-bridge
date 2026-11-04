@@ -4,8 +4,11 @@ HAP-python's Camera does the HomeKit side (stream negotiation, SRTP keys);
 this supplies snapshots from Home Assistant's camera entity and runs ffmpeg
 to turn its stream source into the SRTP stream the Home app asked for. The
 ffmpeg command and resolutions follow core HomeKit's camera accessory.
-Video only: audio needs an RTP clock-rate proxy that core HomeKit ships
-separately.
+
+Audio from the camera to the Home app is Opus, as a second ffmpeg output.
+It's opt-in per camera, because asking ffmpeg for an audio track the source
+doesn't have stops the video too. Talking back through the camera isn't
+supported: Home Assistant has no way to send audio to a camera.
 """
 
 from __future__ import annotations
@@ -48,6 +51,19 @@ VIDEO_OUTPUT = (
     "srtp://{address}:{v_port}?rtcpport={v_port}&"
     "localrtpport={v_port}&pkt_size=1316"
 )
+AUDIO_OUTPUT = (
+    "-map 0:a:0 -vn "
+    "-c:a libopus -application lowdelay "
+    "-ac 1 -ar {a_sample_rate}k "
+    "-b:a {a_max_bitrate}k -bufsize {a_bufsize}k "
+    "-payload_type {a_payload} "
+    "-ssrc {a_ssrc} -f rtp "
+    "-srtp_out_suite AES_CM_128_HMAC_SHA1_80 -srtp_out_params {a_srtp_key} "
+    "srtp://{address}:{a_port}?rtcpport={a_port}&"
+    "localrtpport={a_port}&pkt_size=188"
+)
+# What the Home app uses for Opus when it doesn't say.
+DEFAULT_AUDIO_PAYLOAD = 110
 # Indexed by the H.264 profile the Home app picks (baseline, main, high).
 VIDEO_PROFILES = ["baseline", "main", "high"]
 MAX_WIDTH, MAX_HEIGHT, MAX_FPS = 1920, 1080, 30
@@ -78,7 +94,8 @@ def camera_options(address: str) -> dict[str, Any]:
             },
             "resolutions": [list(r) for r in RESOLUTIONS],
         },
-        # Required by the Home app even when no audio is streamed.
+        # Offered on every camera (the Home app requires it); only streamed
+        # when the camera has audio turned on.
         "audio": {"codecs": [{"type": "OPUS", "samplerate": 24},
                              {"type": "OPUS", "samplerate": 16}]},
         "address": address,
@@ -87,13 +104,25 @@ def camera_options(address: str) -> dict[str, Any]:
     }
 
 
-def ffmpeg_output(stream_config: dict[str, Any]) -> str:
+def ffmpeg_output(stream_config: dict[str, Any], *, audio: bool = False) -> str:
     """The ffmpeg output arguments for a negotiated stream."""
     profile = int.from_bytes(stream_config["v_profile_id"], "big")
-    return VIDEO_OUTPUT.format(
+    video = VIDEO_OUTPUT.format(
         **stream_config,
         v_profile=VIDEO_PROFILES[min(profile, len(VIDEO_PROFILES) - 1)],
         v_bufsize=stream_config["v_max_bitrate"] * 4,
+    )
+    # No audio settings means the Home app didn't ask for any (e.g. muted).
+    if not audio or "a_port" not in stream_config or "a_sample_rate" not in stream_config:
+        return video
+    payload = stream_config.get("a_payload_type")
+    if isinstance(payload, bytes | bytearray):
+        payload = int.from_bytes(payload, "big")
+    max_bitrate = stream_config.get("a_max_bitrate") or 24
+    return video + " " + AUDIO_OUTPUT.format(
+        **{**stream_config, "a_max_bitrate": max_bitrate},
+        a_payload=payload or DEFAULT_AUDIO_PAYLOAD,
+        a_bufsize=max_bitrate * 4,
     )
 
 
@@ -115,6 +144,7 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         self.spec = spec
         assert spec.camera is not None
         self.entity_id = spec.camera
+        self.audio = spec.camera_audio
         super().__init__(camera_options(driver.state.address), driver, *args, **kwargs)
 
     async def async_get_snapshot(self, image_size: dict[str, int]) -> bytes:
@@ -142,7 +172,7 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         opened = await stream.open(
             cmd=[],
             input_source=source,
-            output=ffmpeg_output(stream_config),
+            output=ffmpeg_output(stream_config, audio=self.audio),
             extra_cmd="-hide_banner -nostats",
             stderr_pipe=True,
             stdout_pipe=False,

@@ -104,10 +104,50 @@ async def test_excluded_entity_is_not_exposed(hass, config_entry, lamp):
 async def test_options_flow_saves_filters(hass, config_entry, lamp):
     await _setup(hass, config_entry)
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    assert result["type"] == "menu"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "filters"}
+    )
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {CONF_EXCLUDE_ENTITIES: [lamp]}
     )
     assert config_entry.options[CONF_EXCLUDE_ENTITIES] == [lamp]
+
+
+async def _options_step(hass, entry, step):
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": step})
+
+
+async def test_rename_accessory(hass, config_entry, lamp):
+    bridge = await _setup(hass, config_entry)
+    spec = next(s for s, _a in bridge.accessories() if any(
+        lamp in svc.watched() for svc in s.services))
+    key, default = spec.key, spec.name
+
+    result = await _options_step(hass, config_entry, "rename")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"accessory": key})
+    assert result["step_id"] == "rename_accessory"
+    bad = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"name": "-Lamp!"})
+    assert bad["errors"] == {"name": "invalid_name"}
+    await hass.config_entries.options.async_configure(bad["flow_id"], {"name": "  Reading   Lamp "})
+    await hass.async_block_till_done()
+    assert config_entry.options["names"] == {key: "Reading Lamp"}
+
+    bridge = config_entry.runtime_data
+    spec, acc = next((s, a) for s, a in bridge.accessories() if s.key == key)
+    assert (spec.name, spec.default_name, acc.display_name) == ("Reading Lamp", default, "Reading Lamp")
+
+    # Empty goes back to the profile's name.
+    result = await _options_step(hass, config_entry, "rename")
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"accessory": key})
+    await hass.config_entries.options.async_configure(result["flow_id"], {"name": ""})
+    await hass.async_block_till_done()
+    assert config_entry.options["names"] == {}
+    assert next(s for s, _a in config_entry.runtime_data.accessories() if s.key == key).name == default
 
 
 async def test_new_entities_trigger_one_debounced_reload(hass, config_entry, lamp):

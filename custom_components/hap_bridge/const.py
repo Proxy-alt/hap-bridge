@@ -6,6 +6,10 @@ CONF_INCLUDE_INTEGRATIONS = "include_integrations"
 CONF_INCLUDE_DOMAINS = "include_domains"
 CONF_EXCLUDE_DEVICES = "exclude_devices"
 CONF_EXCLUDE_ENTITIES = "exclude_entities"
+# {accessory key: name} chosen in the options flow.
+CONF_NAMES = "names"
+# Camera entities whose stream's audio goes to HomeKit too.
+CONF_CAMERA_AUDIO = "camera_audio"
 
 DEFAULT_NAME = "HAP Bridge"
 DEFAULT_PORT = 21070

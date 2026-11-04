@@ -175,6 +175,12 @@ class AccessorySpec:
         # A camera entity to stream and snapshot; the bridge adds the camera
         # services and runs ffmpeg. Implies standalone.
         self.camera = camera
+        # Also send the camera stream's audio. Off unless the profile or the
+        # options flow says the camera has it: ffmpeg can't stream a source
+        # without audio when asked for some.
+        self.camera_audio = False
+        # The name the profile gave, when the options flow renamed it.
+        self.default_name = name
         # Which step built it, e.g. "integration:acme", "profile:air_purifier",
         # "fallback". Shown in diagnostics and previews.
         self.source = ctx.source

@@ -14,12 +14,15 @@ def describe_camera(
     motion: str | None = None,
     name: str | None = None,
     key: str | None = None,
+    audio: bool = False,
 ) -> AccessorySpec:
     """A camera entity streamed to the Home app, as a video doorbell if `doorbell`
-    (an event entity) is given, with an optional motion binary sensor."""
+    (an event entity) is given, with an optional motion binary sensor. `audio`
+    sends the stream's sound too; only set it if the stream has an audio track."""
     acc = ctx.accessory(
         name, category="VIDEO_DOOR_BELL" if doorbell else "CAMERA", key=key, camera=camera
     )
+    acc.camera_audio = audio
     acc.claim(camera)
     acc.available = lambda: ctx.available(camera)
     if doorbell is not None:

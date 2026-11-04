@@ -155,3 +155,44 @@ async def test_camera_without_stream_source_fails_cleanly(hass, config_entry, de
     with patch("custom_components.hap_bridge.camera.ha_camera.async_get_stream_source",
                AsyncMock(return_value=None)):
         assert not await cam.start_stream({"id": "s", "stream_idx": 0}, {})
+
+
+VIDEO = {"v_profile_id": b"\x01", "fps": 30, "v_max_bitrate": 300, "v_ssrc": 1,
+         "v_srtp_key": "KEY", "address": "192.168.1.5", "v_port": 51000}
+AUDIO = {"a_port": 51002, "a_srtp_key": "AKEY", "a_ssrc": 7, "a_sample_rate": 16,
+         "a_max_bitrate": 24, "a_payload_type": b"\x6e"}
+
+
+def test_ffmpeg_audio_output():
+    from custom_components.hap_bridge.camera import ffmpeg_output
+
+    with_audio = ffmpeg_output({**VIDEO, **AUDIO}, audio=True)
+    assert "-c:a libopus" in with_audio and "-ar 16k" in with_audio
+    assert "-payload_type 110" in with_audio and "-srtp_out_params AKEY" in with_audio
+    assert "srtp://192.168.1.5:51002" in with_audio
+    # Off, or the Home app asked for none: video only.
+    assert "-c:a" not in ffmpeg_output({**VIDEO, **AUDIO})
+    assert "-c:a" not in ffmpeg_output({**VIDEO, "a_port": 51002}, audio=True)
+
+
+async def test_camera_audio_from_options(hass, config_entry, devices):
+    bridge = await _setup(hass, config_entry)
+    assert not _unit(bridge, "Front Door").root.audio
+
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "camera_audio"})
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"camera_audio": [devices["camera"]]})
+    await hass.async_block_till_done()
+    assert _unit(config_entry.runtime_data, "Front Door").root.audio
+
+
+async def test_profile_can_turn_camera_audio_on(hass):
+    from custom_components.hap_bridge import testing
+
+    async def profile(ctx):
+        ctx.blocks.camera("camera.door", audio=True)
+
+    result = await testing.async_describe(profile, [testing.entry("camera.door")])
+    assert result.accessory().camera_audio

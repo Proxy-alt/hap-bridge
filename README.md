@@ -283,7 +283,14 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   doorbell, and rings show on your devices with a snapshot.
 - If the device has a motion binary sensor, it's added for motion
   notifications.
-- Video only for now: no audio, and no HomeKit Secure Video recording.
+- Sound from the camera reaches the Home app as Opus when audio is turned
+  on for it: in the options (**Camera audio**), or by a profile with
+  `ctx.blocks.camera(camera, audio=True)`. It's off by default because
+  ffmpeg won't play the video either if it's asked for audio the stream
+  doesn't have.
+- Talking back through the camera isn't supported, since Home Assistant has
+  no way to send audio to a camera. HomeKit Secure Video recording isn't
+  supported either.
 
 ## Adaptive Lighting
 
@@ -335,9 +342,19 @@ Devices & services, then pair by scanning the QR code in the notification (or
 typing its code). The bridge's **Reset pairing** button removes every paired
 Home app so you can add it again.
 
-The options choose what to expose: only some integrations or entity domains,
-minus excluded devices and entities. Adding, removing or renaming devices and
-entities rebuilds the bridge after 30 seconds of quiet.
+The options have three parts:
+
+- **What to expose:** only some integrations or entity domains, minus
+  excluded devices and entities.
+- **Rename an accessory:** give an accessory a different name in HomeKit.
+  Leave the name empty to go back to the profile's. HomeKit takes the name
+  when the accessory is first added; after that the Home app keeps its own,
+  so rename accessories you've already added there. The preview shows the
+  original as `default_name`.
+- **Camera audio:** which cameras send sound (see above).
+
+Adding, removing or renaming devices and entities in Home Assistant rebuilds
+the bridge after 30 seconds of quiet.
 
 An accessory shows **No Response** in the Home app when the entities its
 primary service watches are unavailable. A profile can change that rule with
@@ -369,7 +386,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 - **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
 - **Bridges are capped at 149 accessories.** There's no automatic splitting across bridges yet.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
-- **Cameras have no audio and no HomeKit Secure Video.** Live video and snapshots only.
+- **Cameras have no talk-back and no HomeKit Secure Video.** Live video, snapshots, and sound from the camera when it's turned on.
 - **Plain speakers aren't exposed.** HomeKit has no useful service for them (only AirPlay speakers show up properly).
 - **No Matter output.** Robot vacuums need Matter, because HAP has no vacuum service.
 - **Reloads restart the whole bridge.** Controllers reconnect after a device is added or removed.
