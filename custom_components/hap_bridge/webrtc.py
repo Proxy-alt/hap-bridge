@@ -195,7 +195,7 @@ class WebRtcBridge:
                 response.raise_for_status()
                 image = await response.read()
         except Exception as err:  # noqa: BLE001 - the caller falls back
-            _LOGGER.debug("%s: go2rtc couldn't take a snapshot: %r", entity_id, err)
+            _LOGGER.debug("%s: go2rtc couldn't take a snapshot: %s", entity_id, _describe(err))
             return None
         return image or None
 
@@ -224,8 +224,8 @@ class WebRtcBridge:
             ) as response:
                 response.raise_for_status()
         except Exception as err:  # noqa: BLE001 - snapshots just reconnect each time
-            _LOGGER.debug("%s: go2rtc preload %s failed: %r",
-                          entity_id, "start" if start else "stop", err)
+            _LOGGER.debug("%s: go2rtc preload %s failed: %s",
+                          entity_id, "start" if start else "stop", _describe(err))
             return
         _LOGGER.debug("%s: go2rtc %s the stream open for snapshots",
                       entity_id, "keeps" if start else "no longer keeps")
@@ -421,6 +421,12 @@ class WebRtcBridge:
         if self._runner is not None:
             runner, self._runner, self._local_port = self._runner, None, None
             await runner.cleanup()
+
+
+def _describe(err: BaseException) -> str:
+    """An error for the log. Not its repr: for an aiohttp response error
+    that includes the request's headers, and so go2rtc's password."""
+    return f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
 
 
 def _is_local(url: str) -> bool:

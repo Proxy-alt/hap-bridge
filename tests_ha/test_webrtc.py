@@ -461,3 +461,17 @@ async def test_live_video_doesnt_replace_a_stream_go2rtc_has(hass: HomeAssistant
     assert await bridge.async_source(nest.entity_id)
     assert len(go2rtc.added) == 1
     await bridge.async_shutdown()
+
+
+def test_logged_errors_leave_out_request_headers():
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("http://localhost:11984/api/frame.jpeg")
+    headers = CIMultiDictProxy(CIMultiDict({"Authorization": "Basic c2VjcmV0"}))
+    err = ClientResponseError(RequestInfo(url, "GET", headers, url), (), status=500,
+                              message="Internal Server Error")
+    described = webrtc._describe(err)
+    assert "500" in described and "Basic" not in described
+    assert webrtc._describe(TimeoutError()) == "TimeoutError"

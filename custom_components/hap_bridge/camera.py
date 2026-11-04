@@ -216,6 +216,10 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             # Turned off in the Home app (camera off, or that kind of snapshot).
             raise PermissionError("snapshots are turned off in the Home app")
         if self.spec.camera_live_snapshots:
+            # reason: 0 the hub's periodic snapshot, 1 an event's; none from
+            # a Home app showing the camera.
+            _LOGGER.debug("%s: snapshot asked for (reason %s)", self.display_name,
+                          image_size.get("reason"))
             if (frame := await self._async_live_frame(image_size["image-height"])) is not None:
                 return frame
         image = await ha_camera.async_get_image(
