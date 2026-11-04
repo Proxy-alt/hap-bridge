@@ -634,6 +634,25 @@ class _Driver(AccessoryDriver):
         finally:
             self.writing_client = None
 
+    def get_characteristics(self, char_ids: list[str]) -> dict[str, Any]:
+        """Like HAP-python's, but an unreachable accessory still answers its
+        Accessory Information (name, maker, serial number...). Those values are
+        static, and without them HomeKit never learns the serial number of an
+        accessory that was "No Response" when paired, so tools that match
+        accessories by it can't find it. Its other values still fail."""
+        result = super().get_characteristics(char_ids)
+        accessories = getattr(self.accessory, "accessories", {})
+        for rep in result[hap_const.HAP_REPR_CHARS]:
+            if rep.get(hap_const.HAP_REPR_STATUS) == hap_const.HAP_SERVER_STATUS.SUCCESS:
+                continue
+            acc = accessories.get(rep[hap_const.HAP_REPR_AID])
+            char = acc.iid_manager.get_obj(rep[hap_const.HAP_REPR_IID]) if acc else None
+            service = getattr(char, "service", None)
+            if service is not None and service.display_name == "AccessoryInformation":
+                rep[hap_const.HAP_REPR_VALUE] = char.get_value()
+                rep[hap_const.HAP_REPR_STATUS] = hap_const.HAP_SERVER_STATUS.SUCCESS
+        return result
+
     def pair(
         self, client_username_bytes: bytes, client_public: bytes, client_permissions: bytes
     ) -> bool:

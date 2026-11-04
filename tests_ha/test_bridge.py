@@ -64,6 +64,15 @@ async def test_unavailable_entity_means_no_response(hass, config_entry, lamp):
     hass.states.async_set(lamp, "unavailable")
     assert not acc.available
 
+    # Its controls fail, but its static Accessory Information still answers,
+    # so HomeKit can learn the serial number of a "No Response" accessory.
+    serial = acc.get_service("AccessoryInformation").get_characteristic("SerialNumber")
+    on = acc.get_service("Lightbulb").get_characteristic("On")
+    ids = [f"{acc.aid}.{acc.iid_manager.get_iid(c)}" for c in (serial, on)]
+    serial_rep, on_rep = acc.driver.get_characteristics(ids)["characteristics"]
+    assert serial_rep["status"] == 0 and serial_rep["value"].startswith("HB-")
+    assert on_rep["status"] != 0 and "value" not in on_rep
+
 
 async def test_pairing_notification_has_working_qr(hass, config_entry, lamp, hass_client):
     bridge = await _setup(hass, config_entry)
