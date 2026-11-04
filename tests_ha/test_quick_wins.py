@@ -169,7 +169,7 @@ async def test_camera_options_save_prebuffer_choice(hass, config_entry):
     await hass.async_block_till_done()
     assert config_entry.options["camera_no_prebuffer"] == ["camera.porch"]
     acc = next(u.root for u in config_entry.runtime_data.units.values() if u.name == "Porch")
-    assert acc.recording._prebuffer_wanted is False
+    assert acc.recording.prebuffer_wanted is False
 
 
 async def test_room_assignments_from_areas(hass, config_entry):

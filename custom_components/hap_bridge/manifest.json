@@ -4,7 +4,7 @@
   "codeowners": ["@Proxy-alt"],
   "config_flow": true,
   "dependencies": ["ffmpeg", "http", "zeroconf"],
-  "after_dependencies": ["camera"],
+  "after_dependencies": ["camera", "go2rtc"],
   "documentation": "https://github.com/Proxy-alt/hap-bridge",
   "integration_type": "hub",
   "iot_class": "local_push",

@@ -11,7 +11,8 @@ doesn't have stops the video too. Talking back through the camera isn't
 supported: Home Assistant has no way to send audio to a camera.
 
 Cameras with a motion sensor or doorbell also offer HomeKit Secure Video;
-see recording.py.
+see recording.py. Cameras that only stream over WebRTC (Nest, Ring) go
+through Home Assistant's go2rtc; see webrtc.py.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .accessories import SpecAvailability
 from .recording import RecordingManager, Triggers
+from .webrtc import DATA_BRIDGE, WebRtcBridge, native_webrtc
 
 if TYPE_CHECKING:
     from .api import AccessorySpec, Settings
@@ -172,7 +174,10 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             get_source=self._async_source,
             ffmpeg=get_ffmpeg_manager(self.hass).binary,
             audio=self.audio,
-            prebuffer=self.spec.camera_prebuffer,
+            # Keeping a cloud camera's WebRTC stream open all day would drain
+            # batteries and run into the service's limits; record on demand.
+            prebuffer=lambda: (self.spec.camera_prebuffer
+                               and not native_webrtc(self.hass, self.entity_id)),
             load=lambda: settings.get(key),
             save=lambda state: settings.set(key, state),
         )
@@ -188,10 +193,13 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
 
     async def _async_source(self) -> str | None:
         try:
-            return await ha_camera.async_get_stream_source(self.hass, self.entity_id)
+            source = await ha_camera.async_get_stream_source(self.hass, self.entity_id)
         except Exception:  # noqa: BLE001 - reported as a failed recording
             _LOGGER.exception("%s: couldn't get the camera's stream source", self.display_name)
             return None
+        if not source and native_webrtc(self.hass, self.entity_id):
+            return await WebRtcBridge.get(self.hass).async_source(self.entity_id)
+        return source
 
     async def async_get_snapshot(self, image_size: dict[str, int]) -> bytes:
         if self.recording is not None and not self.recording.snapshot_allowed(
@@ -285,3 +293,5 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         await asyncio.gather(*(self.stop_stream(s) for s in list(self.sessions.values())))
         if self.recording is not None:
             await self.recording.async_stop()
+        if (bridge := self.hass.data.get(DATA_BRIDGE)) is not None:
+            await bridge.async_release(self.entity_id)

@@ -294,6 +294,12 @@ the inputs.
 
 **Cameras** stream live video to the Home app and provide snapshots. They use
 the camera's stream source with ffmpeg, as core HomeKit does.
+- Cameras that only stream over WebRTC (Nest battery cameras and doorbells,
+  Ring, and others without a stream URL) go through Home Assistant's go2rtc
+  (part of `default_config`). go2rtc receives the camera's WebRTC stream,
+  which Home Assistant sets up for it, and ffmpeg reads it back over RTSP.
+  The HomeKit Secure Video prebuffer is off for these cameras, so they aren't
+  streaming all day; clips start when the trigger fires, a few seconds late.
 - If the device also has a doorbell `event` entity, the camera becomes a video
   doorbell, and rings show on your devices with a snapshot.
 - If the device has a motion binary sensor, it's added for motion
@@ -543,7 +549,7 @@ python3 -m venv .venv-ha && .venv-ha/bin/pip install -e '.[test-ha]'
 
 ## Not done yet
 
-- **Not yet paired with a real Home app.** The HA tests stub out the HAP server. That matters most for Adaptive Lighting, whose protocol is reverse-engineered.
+- **WebRTC cameras haven't been tried with a real camera.** The go2rtc route is tested against a fake camera only.
 - **Only one request at a time is batched.** `on_write` gets everything in a single Home app request. Core HomeKit also merges changes that arrive a few milliseconds apart, and this bridge doesn't yet.
 - **Cameras have no talk-back.** HomeKit Secure Video hasn't been tried with a real home hub yet.
 - **Speakers have no volume in Home.** They're switches; HomeKit only has a volume control for TVs (and AirPlay speakers).

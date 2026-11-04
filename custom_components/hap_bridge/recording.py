@@ -432,7 +432,7 @@ class RecordingManager:
         get_source: Callable[[], Awaitable[str | None]],
         ffmpeg: str,
         audio: bool,
-        prebuffer: bool = True,
+        prebuffer: bool | Callable[[], bool] = True,
         load: Callable[[], dict[str, Any] | None],
         save: Callable[[dict[str, Any]], None],
     ) -> None:
@@ -686,6 +686,11 @@ class RecordingManager:
     def _recording_audio(self) -> bool:
         return self.camera_audio and bool(self.state["audio"])
 
+    @property
+    def prebuffer_wanted(self) -> bool:
+        wanted = self._prebuffer_wanted
+        return bool(wanted() if callable(wanted) else wanted)
+
     def _update_prebuffer(self) -> None:
         """Run the prebuffer while recording could be asked for, with the
         configuration the hub chose; stop it otherwise."""
@@ -693,7 +698,7 @@ class RecordingManager:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # not started yet; async_start calls this again
-        wanted = (self._prebuffer_wanted and self.server.port is not None
+        wanted = (self.prebuffer_wanted and self.server.port is not None
                   and bool(self.state["active"]) and bool(self.state["camera_active"])
                   and self.config is not None)
         key = (self.config, self._recording_audio()) if wanted else None
