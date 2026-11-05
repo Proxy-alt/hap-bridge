@@ -54,3 +54,18 @@ def test_speaker_switch_powers_or_plays(hass, loader):
 
     # Nothing to control: left out.
     assert not _single(hass, loader, "media_player.dumb", "idle").accessories
+
+
+def test_fan_with_few_speeds_gets_a_stepped_slider(hass, loader):
+    ctx = _single(hass, loader, "fan.ceiling", "on",
+                  {"percentage": 67, "percentage_step": 33.333333}, supported_features=1)
+    speed = ctx.accessories[0].services[0].chars["RotationSpeed"]
+    assert speed.props == {"minStep": 33.3333}
+    speed.set(66.6)
+    assert hass.services.calls[-1] == (
+        "fan", "set_percentage", {"entity_id": "fan.ceiling", "percentage": 67})
+
+    # A fan with fine steps keeps the default slider.
+    ctx = _single(hass, loader, "fan.fine", "on",
+                  {"percentage": 50, "percentage_step": 1}, supported_features=1)
+    assert ctx.accessories[0].services[0].chars["RotationSpeed"].props == {}

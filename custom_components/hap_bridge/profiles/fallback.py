@@ -142,11 +142,16 @@ def bind_fan(ctx: HapContext, svc: ServiceSpec, ent: RegistryEntry) -> None:
         set=lambda v: ctx.call("fan", "turn_on" if v else "turn_off", eid),
     )
     if features & FAN_SET_SPEED:
+        # A fan with a few speeds gets a stepped slider in the Home app, as in
+        # core HomeKit: HA says how wide a step is in `percentage_step`.
+        step = ctx.attr(eid, "percentage_step")
+        props = {"minStep": round(step, 4)} if isinstance(step, (int, float)) and 1 < step <= 100 else {}
         svc.char(
             "RotationSpeed",
             watch=[eid],
             get=lambda: ctx.attr(eid, "percentage") or 0,
-            set=lambda v: ctx.call("fan", "set_percentage", eid, percentage=v),
+            set=lambda v: ctx.call("fan", "set_percentage", eid, percentage=round(v)),
+            props=props,
         )
     if features & FAN_OSCILLATE:
         svc.char(
