@@ -145,8 +145,10 @@ def describe_tv(ctx: HapContext, ent: RegistryEntry, remote: str | None = None) 
     tv = acc.service("Television", primary=True)
     sources: list[str] = []
     if features & SELECT_SOURCE:
+        # The live list first: the registry's copy is a snapshot from when the
+        # entity last registered, and goes stale for TVs whose apps load later.
         caps = ent.capabilities or {}
-        sources = list(dict.fromkeys(caps.get("source_list") or ctx.attr(eid, "source_list") or []))
+        sources = list(dict.fromkeys(ctx.attr(eid, "source_list") or caps.get("source_list") or []))
     _bind_television(
         ctx, acc, tv, ent,
         power=lambda on: ctx.call("media_player", "turn_on" if on else "turn_off", eid),

@@ -222,3 +222,9 @@ def test_motion_events_hold_and_filter(hass):
     hass.states.set("binary_sensor.pir", "off")
     hass.states.set("event.cam", "unavailable")
     assert not trig.is_on()
+
+
+def test_inputs_follow_the_live_source_list_over_the_registry_snapshot(hass):
+    ctx = _tv(hass, source_list=["TV", "HDMI", "Netflix", "YouTube"])
+    inputs = _services(ctx.accessories[0], "InputSource")
+    assert [s.chars["Name"].get() for s in inputs] == ["TV", "HDMI", "Netflix", "YouTube"]
