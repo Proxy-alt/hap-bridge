@@ -199,6 +199,19 @@ async def test_example_shims_are_valid():
     result.assert_valid()
     assert result.values(result.accessory())["AirPurifier.TargetAirPurifierState"] == 1
 
+    hass.states.set("media_player.tv", "playing", source="Netflix", source_list=["HDMI 1", "Netflix"])
+    result = await testing.async_describe(load("samsungtv_smart").async_describe_device, [
+        testing.entry("media_player.tv", platform="samsungtv_smart", device_class="tv",
+                      supported_features=2048 | 16384),
+        testing.entry("remote.tv", platform="samsungtv_smart"),
+    ], hass=hass)
+    result.assert_valid()
+    await result.async_write(result.accessory(), "Television", "RemoteKey", 4)
+    assert hass.services.calls[-1] == (
+        "remote", "send_command", {"entity_id": "remote.tv", "command": ["KEY_UP"]})
+    await result.async_write(result.accessory(), "Television", "RemoteKey", 11)
+    assert hass.services.calls[-1][:2] == ("media_player", "media_pause")
+
     pack = load("hap_bridge_shims")
     hass.states.set("vacuum.robo", "docked")
     hass.states.set("sensor.robo_battery", "80")

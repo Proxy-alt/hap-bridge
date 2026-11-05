@@ -236,6 +236,8 @@ integration covers thousands of products.
   restart. They're Python run by Home Assistant, the same trust as anything
   in `custom_components`: only add files you'd trust there. See
   [examples/shims/ikea_starkvind.py](examples/shims/ikea_starkvind.py).
+  [examples/shims/samsungtv_smart.py](examples/shims/samsungtv_smart.py) does the
+  same for the SamsungTV Smart custom integration's Remote keys.
 - **Profile packs.** Any integration (for example a community collection
   from HACS) can ship a `hap_bridge_shims.py` with a `SHIMS` list of `{"name",
   "handles", "describe"}` entries. See
