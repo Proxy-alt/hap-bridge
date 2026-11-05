@@ -34,6 +34,7 @@ from pyhap.camera import (
 from homeassistant.components import camera as ha_camera
 from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_time_interval
 
 from .accessories import SpecAvailability
@@ -44,6 +45,15 @@ if TYPE_CHECKING:
     from .api import AccessorySpec, Settings
 
 _LOGGER = logging.getLogger(__name__)
+
+# Live snapshots (AccessorySpec.camera_live_snapshots) have 9 seconds in all
+# before HomeKit gives up on them: this long for a frame of the stream, then
+# this long for the camera's own image.
+LIVE_WAIT = 5.0
+IMAGE_WAIT = 3.0
+# After a live snapshot fails, the camera's image is used for this long
+# before the stream is tried again.
+LIVE_RETRY = 60.0
 
 VIDEO_OUTPUT = (
     "-map 0:v:0 -an "
@@ -157,6 +167,11 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         self.recording: RecordingManager | None = None
         # A live snapshot being taken; requests meanwhile share it.
         self._frame: asyncio.Task[bytes | None] | None = None
+        # The last snapshot sent: what a live-snapshot camera sends when
+        # neither the stream nor the camera's own image comes in time.
+        self._last_image: bytes | None = None
+        # After a live snapshot fails, when to try the stream again.
+        self._live_retry_at = 0.0
         super().__init__(camera_options(driver.state.address), driver, *args, **kwargs)
 
     def setup_recording(self, settings: Settings) -> None:
@@ -216,12 +231,7 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             # Turned off in the Home app (camera off, or that kind of snapshot).
             raise PermissionError("snapshots are turned off in the Home app")
         if self.spec.camera_live_snapshots:
-            # reason: 0 the hub's periodic snapshot, 1 an event's; none from
-            # a Home app showing the camera.
-            _LOGGER.debug("%s: snapshot asked for (reason %s)", self.display_name,
-                          image_size.get("reason"))
-            if (frame := await self._async_live_frame(image_size["image-height"])) is not None:
-                return frame
+            return await self._async_live_snapshot(image_size)
         image = await ha_camera.async_get_image(
             self.hass,
             self.entity_id,
@@ -230,21 +240,59 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
         )
         return image.content
 
+    async def _async_live_snapshot(self, image_size: dict[str, int]) -> bytes:
+        """For a camera whose image is stale: a frame of its live stream, else
+        its image, else the last snapshot sent, within HomeKit's time limit
+        for a snapshot (9 seconds; any later and the camera is shown as not
+        responding)."""
+        # reason: 0 a periodic snapshot (the Home app or the home hub showing
+        # the camera), 1 an event's.
+        _LOGGER.debug("%s: snapshot asked for (reason %s)", self.display_name,
+                      image_size.get("reason"))
+        loop = asyncio.get_running_loop()
+        if loop.time() >= self._live_retry_at:
+            if (frame := await self._async_live_frame(image_size["image-height"])) is not None:
+                return frame
+            self._live_retry_at = loop.time() + LIVE_RETRY
+            _LOGGER.debug("%s: no live snapshot; using the camera's image for %ss",
+                          self.display_name, LIVE_RETRY)
+        try:
+            async with asyncio.timeout(IMAGE_WAIT):
+                image = await ha_camera.async_get_image(
+                    self.hass, self.entity_id,
+                    width=image_size["image-width"], height=image_size["image-height"],
+                )
+        except (HomeAssistantError, TimeoutError) as err:
+            if self._last_image is None:
+                raise
+            _LOGGER.debug("%s: no image either (%s); sending the last snapshot",
+                          self.display_name, str(err) or type(err).__name__)
+            return self._last_image
+        self._last_image = image.content
+        return image.content
+
     async def _async_live_frame(self, height: int) -> bytes | None:
-        """A frame of the live stream from go2rtc, for cameras whose image is
-        stale. Controllers often ask at once; they share one frame."""
+        """A frame of the live stream from go2rtc, if it comes within
+        LIVE_WAIT. Controllers often ask at once; they share one frame, and
+        one that comes later is kept for the next snapshot to fall back on."""
         if self._frame is None:
-            self._frame = self.hass.async_create_task(
+            self._frame = task = self.hass.async_create_task(
                 WebRtcBridge.get(self.hass).async_frame(
                     self.entity_id, height=height,
                     video_profile=self.spec.camera_video_profile),
                 f"{self.display_name} snapshot",
             )
-            self._frame.add_done_callback(lambda _task: setattr(self, "_frame", None))
-        frame = await asyncio.shield(self._frame)
-        if frame is None:
-            _LOGGER.debug("%s: no live snapshot; using the camera's image", self.display_name)
-        return frame
+
+            def done(_task: asyncio.Task[bytes | None]) -> None:
+                self._frame = None
+                if not task.cancelled() and task.exception() is None and task.result():
+                    self._last_image = task.result()
+
+            task.add_done_callback(done)
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._frame), LIVE_WAIT)
+        except TimeoutError:
+            return None
 
     async def start_stream(self, session_info: dict[str, Any], stream_config: dict[str, Any]) -> bool:
         if self.recording is not None and not self.recording.streaming_allowed:

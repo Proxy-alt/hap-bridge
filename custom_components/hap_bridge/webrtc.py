@@ -53,8 +53,10 @@ GO2RTC: HassKey[Any] = HassKey("go2rtc")
 MANAGED_RTSP = "rtsp://127.0.0.1:18554"
 OTHER_RTSP_PORT = 8554
 ANSWER_TIMEOUT = 20.0
-# How long go2rtc gets to take a snapshot (open the stream, wait for a keyframe).
-FRAME_TIMEOUT = 10.0
+# How long a snapshot from go2rtc may take in all (add the stream, open it,
+# wait for a keyframe). A camera that can't connect otherwise holds it up for
+# as long as go2rtc keeps trying.
+FRAME_TIMEOUT = 8.0
 # A snapshot go2rtc took this recently is reused (several controllers poll).
 FRAME_CACHE = "5s"
 # While snapshots keep coming (the Home app or the home hub is showing the
@@ -172,6 +174,16 @@ class WebRtcBridge:
         config = self.hass.data.get(GO2RTC)
         if config is None:
             return None
+        try:
+            async with asyncio.timeout(FRAME_TIMEOUT):
+                return await self._async_frame(config, entity_id, height, video_profile)
+        except TimeoutError:
+            _LOGGER.debug("%s: go2rtc took too long to take a snapshot", entity_id)
+            return None
+
+    async def _async_frame(
+        self, config: Any, entity_id: str, height: int | None, video_profile: str | None
+    ) -> bytes | None:
         if not await self._async_has_stream(config, entity_id):
             if native_webrtc(self.hass, entity_id):
                 if await self.async_source(entity_id, video_profile=video_profile) is None:
@@ -184,27 +196,36 @@ class WebRtcBridge:
                     return None
                 if not source or not await self._async_put_stream(config, entity_id, source):
                     return None
-        await self._async_keep_warm(config, entity_id)
+        self._keep_warm(config, entity_id)
         params = {"src": stream_name(entity_id), "cache": FRAME_CACHE}
         if height:
             params["h"] = str(height)
         try:
-            async with asyncio.timeout(FRAME_TIMEOUT), config.session.get(
+            async with config.session.get(
                 f"{config.url.rstrip('/')}/api/frame.jpeg", params=params,
             ) as response:
                 response.raise_for_status()
                 image = await response.read()
+        except TimeoutError:
+            raise
         except Exception as err:  # noqa: BLE001 - the caller falls back
             _LOGGER.debug("%s: go2rtc couldn't take a snapshot: %s", entity_id, _describe(err))
             return None
         return image or None
 
-    async def _async_keep_warm(self, config: Any, entity_id: str) -> None:
-        """Keep go2rtc's stream open until WARM_SECONDS after this snapshot."""
+    def _keep_warm(self, config: Any, entity_id: str) -> None:
+        """Keep go2rtc's stream open until WARM_SECONDS after this snapshot.
+
+        Starting the preload waits for go2rtc to connect to the camera, so
+        it's left to run on its own rather than holding up the snapshot.
+        """
         if (cancel := self._warm.pop(entity_id, None)) is not None:
             cancel()
         else:
-            await self._async_preload(config, entity_id, start=True)
+            self.hass.async_create_background_task(
+                self._async_preload(config, entity_id, start=True),
+                f"{DOMAIN} go2rtc preload {entity_id}",
+            )
 
         async def cool(_now: Any) -> None:
             if self._warm.pop(entity_id, None) is None:

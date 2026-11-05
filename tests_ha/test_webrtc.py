@@ -475,3 +475,50 @@ def test_logged_errors_leave_out_request_headers():
     described = webrtc._describe(err)
     assert "500" in described and "Basic" not in described
     assert webrtc._describe(TimeoutError()) == "TimeoutError"
+
+
+async def test_frame_doesnt_wait_for_go2rtc_to_connect(hass: HomeAssistant):
+    """Starting a preload, or anything else go2rtc is slow to answer, waits
+    for go2rtc to reach the camera. A camera that can't connect mustn't hold
+    up the snapshot past FRAME_TIMEOUT."""
+    import asyncio
+    from unittest.mock import patch
+
+    nest, _ = await _cameras(hass)
+    bridge = webrtc.WebRtcBridge.get(hass)
+    bridge._async_local_port = AsyncMock(return_value=40002)
+    stuck = asyncio.Event()
+
+    class SlowPreload(FrameGo2rtc):
+        def put(self, url, params):
+            if not url.endswith("/api/preload"):
+                return super().put(url, params)
+            self.preloads.append(("start", params["src"]))
+            return _Hang(stuck)
+
+    go2rtc = SlowPreload()
+    hass.data[webrtc.GO2RTC] = SimpleNamespace(url="http://localhost:11984/", session=go2rtc)
+    # The preload hangs, but the frame doesn't wait for it.
+    assert await asyncio.wait_for(bridge.async_frame(nest.entity_id), 1) == b"jpeg"
+    assert go2rtc.preloads == [("start", "hap_bridge_camera_doorbell")]
+
+    # go2rtc itself hanging: given up on after FRAME_TIMEOUT.
+    go2rtc.get = lambda url, params: _Hang(stuck)
+    with patch.object(webrtc, "FRAME_TIMEOUT", 0.05):
+        assert await asyncio.wait_for(bridge.async_frame(nest.entity_id), 1) is None
+    stuck.set()
+    await bridge.async_shutdown()
+
+
+class _Hang:
+    """A response that doesn't come until `until` is set."""
+
+    def __init__(self, until) -> None:
+        self.until = until
+
+    async def __aenter__(self):
+        await self.until.wait()
+        return _FrameResponse({})
+
+    async def __aexit__(self, *exc):
+        return False

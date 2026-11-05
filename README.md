@@ -314,7 +314,10 @@ the camera's stream source with ffmpeg, as core HomeKit does.
   `blocks.camera(..., live_snapshots=True)`. Then each snapshot the Home app
   asks for, which it does every few seconds while it shows the camera, is a
   frame that go2rtc takes from the live stream. If go2rtc can't take one in
-  10 seconds, the camera's own image is used. While snapshots keep coming
+  5 seconds, the camera's own image is used, and the stream isn't tried
+  again for a minute. If that image doesn't come within 3 seconds either,
+  the last snapshot is sent again. HomeKit allows a snapshot 9 seconds and
+  shows the camera as not responding after that. While snapshots keep coming
   (the Home app, or the home hub, is showing the camera), go2rtc keeps the
   stream open between them instead of reconnecting for each. 30 seconds
   after the last one it lets go, and the stream closes. So a WebRTC-only

@@ -411,3 +411,49 @@ async def test_one_accessory_failing_to_stop_doesnt_fail_the_unload(
     await hass.async_block_till_done()
     assert config_entry.state is ConfigEntryState.LOADED
     assert "stopping its HAP server failed" in caplog.text
+
+
+async def test_live_snapshot_answers_in_time_when_the_stream_wont_come(
+    hass, config_entry, devices
+):
+    """A camera whose stream can't connect mustn't hold snapshots past
+    HomeKit's 9 seconds: the Home app then shows it as not responding."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.hap_bridge import camera as camera_mod
+    from custom_components.hap_bridge.webrtc import WebRtcBridge
+
+    bridge = await _setup(hass, config_entry)
+    cam = _unit(bridge, "Front Door").root
+    cam.spec.camera_live_snapshots = True
+    size = {"image-width": 640, "image-height": 360}
+    never = asyncio.Event()
+
+    async def stuck(entity_id, *, height=None, video_profile=None):
+        await never.wait()
+
+    image = AsyncMock(return_value=Image("image/jpeg", b"event"))
+    with patch.object(camera_mod, "LIVE_WAIT", 0.05), \
+            patch("homeassistant.components.camera.async_get_image", image), \
+            patch.object(WebRtcBridge, "async_frame", side_effect=stuck) as grab:
+        assert await cam.async_get_snapshot(size) == b"event"
+        # The stream isn't tried again for a while, so no more waiting.
+        assert await cam.async_get_snapshot(size) == b"event"
+        assert grab.call_count == 1
+
+        # The camera's own image fails too: the last snapshot sent.
+        image.side_effect = HomeAssistantError("no recent event")
+        assert await cam.async_get_snapshot(size) == b"event"
+
+        # ...and with nothing sent yet, the error reaches HomeKit.
+        cam._last_image = None
+        with pytest.raises(HomeAssistantError):
+            await cam.async_get_snapshot(size)
+
+        # Once the stream comes again, snapshots are live again.
+        never.set()
+        await hass.async_block_till_done()  # the stuck attempt finishes
+        grab.side_effect = None
+        grab.return_value = b"late"
+        cam._live_retry_at = 0
+        assert await cam.async_get_snapshot(size) == b"late"
