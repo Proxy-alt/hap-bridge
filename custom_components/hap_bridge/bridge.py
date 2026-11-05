@@ -184,7 +184,7 @@ class HapBridge:
             unit.accessories.append((spec, acc))
         for index in sorted(bridges):
             unit = bridges[index]
-            unit.driver.add_accessory(unit.root)
+            await self.hass.async_add_executor_job(unit.driver.add_accessory, unit.root)
             self.units[unit.id] = unit
 
         for spec in standalone:
@@ -197,7 +197,7 @@ class HapBridge:
                                     iid_aid=self._registry.aid(spec.key))
             unit.root = acc
             unit.accessories.append((spec, acc))
-            unit.driver.add_accessory(acc)
+            await self.hass.async_add_executor_job(unit.driver.add_accessory, acc)
             self.units[unit.id] = unit
 
         if self._registry.dirty:
@@ -499,6 +499,11 @@ class HapBridge:
                     f"{spec.name}: writing {svc_spec.type_name}", write, refresh
                 )
             for name, char_spec in svc_spec.chars.items():
+                if char_spec.valid_values:
+                    # Start on an allowed value: the default (0) may not be
+                    # one, which pyhap logs as an error.
+                    service.get_characteristic(name).value = next(
+                        iter(char_spec.valid_values.values()))
                 char = service.configure_char(
                     name,
                     properties=char_spec.props or None,

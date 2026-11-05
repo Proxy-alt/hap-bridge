@@ -355,7 +355,10 @@ class HapContext:
         """The config entry of `domain` this device (or entity) belongs to."""
         entry_ids: set[str] = set()
         if self.device is not None:
-            entry_ids.update(getattr(self.device, "config_entries", ()))
+            if (entry_id := getattr(self.device, "config_entry_id", None)) is not None:
+                entry_ids.add(entry_id)  # a device has one config entry now
+            else:
+                entry_ids.update(getattr(self.device, "config_entries", ()))
         entry_ids.update(
             entry_id for e in self.entries if (entry_id := getattr(e, "config_entry_id", None))
         )
