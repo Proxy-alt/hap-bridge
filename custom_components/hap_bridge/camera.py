@@ -308,10 +308,12 @@ class CameraAccessory(SpecAvailability, PyhapCamera):
             _LOGGER.debug("%s: ffmpeg: %s", self.display_name, text)
 
     async def stop_stream(self, session_info: dict[str, Any]) -> None:
-        if (stream := session_info.get("stream")) is None:
+        # Called twice on unload: by async_stop_streams, then by HAP-python's
+        # Camera.stop. Once stopped, HAFFmpeg has no process any more.
+        if (stream := session_info.pop("stream", None)) is None:
             return
         self._stop_watching(session_info)
-        if not _pid_alive(stream.process.pid):
+        if stream.process is None or not _pid_alive(session_info["pid"]):
             return
         for method in ("close", "kill"):
             try:

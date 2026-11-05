@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -361,3 +362,52 @@ async def test_live_snapshots_come_from_go2rtc(hass, config_entry, devices):
         grab.side_effect = None
         grab.return_value = None
         assert await cam.async_get_snapshot(size) == b"event"
+
+
+class _Ffmpeg:
+    """A running HAFFmpeg, as far as stopping it goes: close() clears its
+    process, as haffmpeg's does."""
+
+    def __init__(self) -> None:
+        self.process = SimpleNamespace(pid=os.getpid())
+        self.closed = 0
+
+    async def close(self) -> None:
+        self.closed += 1
+        self.process = None
+
+
+async def test_reload_with_a_live_stream_open(hass, config_entry, devices):
+    """Resetting pairing reloads the bridge. A camera streaming to the Home app
+    then gets stop_stream twice (our unload, then HAP-python's Camera.stop),
+    which failed the unload and left the bridge unable to reload."""
+    from homeassistant.config_entries import ConfigEntryState
+
+    bridge = await _setup(hass, config_entry)
+    unit = _unit(bridge, "Front Door")
+    cam = unit.root
+    ffmpeg = _Ffmpeg()
+    cam.sessions["s1"] = {"id": "s1", "stream_idx": 0, "stream": ffmpeg,
+                          "pid": ffmpeg.process.pid}
+
+    async def hap_python_stop():
+        await cam.stop()  # what AccessoryDriver.async_stop does
+
+    unit.driver.async_stop = AsyncMock(side_effect=hap_python_stop)
+    assert await hass.config_entries.async_reload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.LOADED
+    assert ffmpeg.closed == 1
+
+
+async def test_one_accessory_failing_to_stop_doesnt_fail_the_unload(
+    hass, config_entry, devices, caplog
+):
+    from homeassistant.config_entries import ConfigEntryState
+
+    bridge = await _setup(hass, config_entry)
+    _unit(bridge, "Front Door").driver.async_stop = AsyncMock(side_effect=RuntimeError("boom"))
+    assert await hass.config_entries.async_reload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.LOADED
+    assert "stopping its HAP server failed" in caplog.text

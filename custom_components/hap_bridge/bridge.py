@@ -265,15 +265,23 @@ class HapBridge:
         for cancel in self._rechecks.values():
             cancel()
         self._rechecks.clear()
+        # One accessory failing to stop mustn't fail the unload: Home Assistant
+        # then refuses every later reload until it restarts.
         for unit in self.units.values():
-            for _spec, acc in unit.accessories:
+            for spec, acc in unit.accessories:
                 if (stop_streams := getattr(acc, "async_stop_streams", None)) is not None:
-                    await stop_streams()
+                    try:
+                        await stop_streams()
+                    except Exception:  # noqa: BLE001 - see above
+                        _LOGGER.exception("%s: stopping its streams failed", spec.name)
             if unit.running:
                 # Stopping a driver that never started fails inside HAP-python,
                 # which matters when async_start gave up halfway.
-                await unit.driver.async_stop()
                 unit.running = False
+                try:
+                    await unit.driver.async_stop()
+                except Exception:  # noqa: BLE001 - see above
+                    _LOGGER.exception("%s: stopping its HAP server failed", unit.name)
         self.units.clear()
         self._bindings.clear()
         if self._settings.data:
